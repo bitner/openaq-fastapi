@@ -10,3 +10,6 @@ buildpg
 aiocache
 jq
 orjson
+msgpack
+asyncpg
+uvicorn

@@ -3,7 +3,6 @@ from typing import Any
 
 import asyncpg
 import orjson
-import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -82,7 +81,11 @@ app.include_router(averages_router)
 handler = Mangum(app, enable_lifespan=False)
 
 def run():
-    uvicorn.run('openaq_fastapi.main:app', host="0.0.0.0", port=8888, reload=True)
+    try:
+        import uvicorn
+        uvicorn.run('openaq_fastapi.main:app', host="0.0.0.0", port=8888, reload=True)
+    except:
+        pass
 
 if __name__ == "__main__":
     run()

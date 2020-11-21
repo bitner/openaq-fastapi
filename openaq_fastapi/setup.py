@@ -24,6 +24,8 @@ setup(
         'orjson',
         'uvicorn',
         'msgpack',
+        'asyncpg',
+        'uvicorn',
     ],
     extras_require={
         'dev': [
