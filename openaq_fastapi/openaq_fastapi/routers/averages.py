@@ -5,7 +5,7 @@ from typing import Optional
 import orjson as json
 from fastapi import APIRouter, Depends, Query
 
-from .base import DB, Filters, MeasurementPaging, Spatial, Temporal
+from .base import DB, MeasurementFilters, MeasurementPaging, Spatial, Temporal
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -17,7 +17,7 @@ router = APIRouter()
 async def locations_get(
     db: DB = Depends(),
     paging: MeasurementPaging = Depends(),
-    filters: Filters = Depends(),
+    filters: MeasurementFilters = Depends(),
     spatial: Optional[Spatial] = Query("country"),
     temporal: Optional[Temporal] = Query("year"),
 ):
@@ -29,168 +29,199 @@ async def locations_get(
     date_from_adj = paging.date_from_adj
     date_to_adj = paging.date_to_adj
 
-    params = {
+    params = {}
+    params.update(paging_q["params"])
+    params.update(where_q["params"])
+
+    params.update( {
         "date_to": date_to,
         "date_from": date_from,
         "date_to_adj": date_to_adj,
         "date_from_adj": date_from_adj,
-    }
-    params.update(paging_q["params"])
-    params.update(where_q["params"])
+    })
 
     where_sql = where_q["q"]
     paging_sql = paging_q["q"]
 
-    if spatial == "location":
-        spatial = "site_name"
-        spatial_sql = "b. country, b.city, b.site_name, b.lat, b.lon"
-        final_query = """
-            SELECT
-                total,
-                json_build_object(
-                    'country', country,
-                    'city', city,
-                    'location', site_name,
-                    'coordinates', json_build_object(
-                        'longitude', lon,
-                        'latitude', lat
-                        ),
-                    'parameter', measurand,
-                    'date', d::date,
-                    'measurement_count', measurement_count,
-                    'average', average,
-                    'unit', units
-                ) as json
-            FROM t
-        """
+    if spatial == 'project':
+       spatial='source_name'
 
-    elif spatial == "city":
-        spatial_sql = "b.country, b.city"
-        final_query = """
-            SELECT
-                total,
-                json_build_object(
-                    'country', country,
-                    'city', city,
-                    'parameter', measurand,
-                    'date', d::date,
-                    'measurement_count', measurement_count,
-                    'average', average,
-                    'unit', units
-                ) as json
-            FROM t
-        """
-    else:
-        spatial_sql = "b.country"
-        final_query = """
-            SELECT
-                total,
-                json_build_object(
-                    'country', country,
-                    'parameter', measurand,
-                    'date', d::date,
-                    'measurement_count', measurement_count,
-                    'average', average,
-                    'unit', units
-                ) as json
-            FROM t
-        """
 
+
+    temporal_col = temporal_q = temporal_order = f"{temporal}::date"
     if temporal == "day":
+        table = 'sensors_daily'
+    elif temporal == "month":
+        table = 'sensors_monthly'
+    elif temporal == "year":
+        table = 'sensors_yearly'
+    elif temporal == "moy":
+        table = 'sensors_monthly'
+        temporal_order = "to_char(month, 'MM')"
+        temporal_col = "to_char(month, 'Mon')"
+        temporal_q = "month"
+    elif temporal == "dow":
+        table = 'sensors_daily'
+        temporal_col = "to_char(day, 'Dy')"
+        temporal_order = "to_char(day, 'ID')"
+        temporal_q = "day"
+
+    else:
+        raise Exception
+
+
+    base_obj = [
+        "'parameter'", "measurand",
+        f"'{temporal}'", "d",
+        "'measurement_count'", "measurement_count",
+        "'average'", "average",
+        "'unit'", "units"
+    ]
+    cols=[]
+    if spatial in ['country', 'city', 'location']:
+        base_obj.extend([
+            "'country'", "country"
+        ])
+        cols.append('country')
+
+    if spatial == 'source_name':
+        base_obj.extend([
+            "'source_name'", "source_name"
+        ])
+        cols.append('source_name')
+
+    if spatial in ['city', 'location']:
+        base_obj.extend([
+            "'city'", "city"
+        ])
+        cols.append('city')
+
+    if spatial == 'location':
+        spatial = "site_name"
+        cols.append(["site_name", "lat", "lon"])
+        base_obj.extend([
+            "'location'", "site_name",
+            "'coordinates'",
+            "json_build_object('longitude', lon,'latitude', lat)"
+        ])
+    logger.debug(f"base_obj: {base_obj}")
+    logger.debug(f"cols: {cols}")
+    base = ','.join(base_obj)
+    spatial_sql = ','.join(cols)
+
+    final_query = f"""
+        SELECT
+            total,
+            json_build_object({base}) as json
+        FROM t
+        """
+
+    q = f"""
+        WITH base AS (
+            SELECT
+                {temporal_col} as d,
+                {temporal_order} as o,
+                measurand,
+                units,
+                {spatial_sql},
+                value_count,
+                value_sum
+            FROM
+                measurements_web_base b
+                LEFT JOIN {table} t USING (sensors_id)
+            WHERE
+                {temporal_q} >= :date_from::timestamptz
+                AND
+                {temporal_q} <= :date_to::timestamptz
+                AND
+                {where_sql}
+        ), t as (
+        SELECT
+            d,
+            o,
+            measurand,
+            units,
+            {spatial_sql},
+            count(*) over () as total,
+            sum(value_count) as measurement_count,
+            sum(value_sum) / sum(value_count) as average
+        FROM base
+        GROUP BY
+            d,
+            o,
+            measurand,
+            units,
+            {spatial_sql}
+        ORDER BY {spatial} ASC, measurand, o ASC NULLS LAST
+        LIMIT :limit
+        OFFSET :offset
+        )
+        {final_query}
+        """
+
+    if (temporal in ['day','dow'] and spatial in  ["country", "source_name"]):
+        if spatial == "country":
+            spatial_filter = filters.country[0]
+            table='countries_daily'
+        elif spatial == "source_name":
+            spatial_filter = filters.project[0]
+            table='sources_daily'
+        params.update({
+            "spatial": spatial_filter,
+            "measurand": filters.measurand[0].value,
+        })
         q = f"""
-            WITH t AS (
+            WITH base AS (
                 SELECT
-                    count(*) over () as total,
+                    {temporal_col} as d,
+                    {temporal_order} as o,
+                    _measurand as measurand,
+                    _units as units,
                     {spatial_sql},
-                    day as d,
-                    measurand,
-                    units,
-                    sum(value_count) as measurement_count,
-                    sum(value_sum) / sum(value_count) as average
+                    value_count,
+                    value_sum
                 FROM
-                    measurements_web_base b
-                    LEFT JOIN sensors_daily USING (sensors_id)
+                    {table}
                 WHERE
-                    day >= :date_from::timestamptz
+                    {spatial}=:spatial
                     AND
-                    day <= :date_to::timestamptz
+                    _measurand=:measurand
                     AND
-                    {where_sql}
-                GROUP BY
-                    day,
-                    measurand,
-                    units,
-                    {spatial_sql}
-                {paging_sql}
+                    {temporal_q} >= :date_from::timestamptz
+                    AND
+                    {temporal_q} <= :date_to::timestamptz
+            ), t as (
+            SELECT
+                d,
+                o,
+                measurand,
+                units,
+                {spatial_sql},
+                count(*) over () as total,
+                sum(value_count) as measurement_count,
+                sum(value_sum) / sum(value_count) as average
+            FROM base
+            GROUP BY
+                d,
+                o,
+                measurand,
+                units,
+                {spatial_sql}
+            ORDER BY {spatial} ASC, measurand, o ASC NULLS LAST
+            LIMIT :limit
+            OFFSET :offset
             )
             {final_query}
             """
-    elif temporal == "month":
-        q = f"""
-        WITH t AS (
-            SELECT
-                count(*) over () as total,
-                {spatial_sql},
-                month as d,
-                measurand,
-                units,
-                sum(value_count) as measurement_count,
-                sum(value_sum) / sum(value_count) as average
-            FROM
-                measurements_web_base b
-                LEFT JOIN sensors_monthly USING (sensors_id)
-            WHERE
-                month >= :date_from::timestamptz
-                AND
-                month <= :date_to::timestamptz
-                AND
-                {where_sql}
-            GROUP BY
-                month,
-                measurand,
-                units,
-                {spatial_sql}
-            {paging_sql}
-        )
-        {final_query}
-        """
-    else:
-        q = f"""
-        WITH t AS (
-            SELECT
-                count(*) over () as total,
-                {spatial_sql},
-                year as d,
-                measurand,
-                units,
-                sum(value_count) as measurement_count,
-                sum(value_sum) / sum(value_count) as average
-            FROM
-                measurements_web_base b
-                LEFT JOIN sensors_yearly USING (sensors_id)
-            WHERE
-                year >= :date_from::timestamptz
-                AND
-                year <= :date_to::timestamptz
-                AND
-                {where_sql}
-            GROUP BY
-                year,
-                measurand,
-                units,
-                {spatial_sql}
-            {paging_sql}
-        )
-        {final_query}
-        """
 
     rows = await db.fetch(q, params)
 
-    total = rows[0][0]
 
     if len(rows) > 0:
+        total = rows[0][0]
         json_rows = [json.loads(r["json"]) for r in rows]
     else:
+        total = 0
         json_rows = []
 
     meta = {

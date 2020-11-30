@@ -87,7 +87,8 @@ locations_jq = jq.compile(
     """
     . | {
         meta: .meta,
-        results: .results[] |
+        results: [
+            .results[] |
             {
                 id: .sensor_nodes_id,
                 country: .country,
@@ -114,6 +115,7 @@ locations_jq = jq.compile(
                 ],
                 count: .sensor_systems[].sensors | map(.value_count) | add
             }
+        ]
     }
     """
 )
@@ -122,7 +124,7 @@ locations_jq = jq.compile(
 @router.get("/locations")
 async def get_data(nodes: Nodes = Depends()):
     data = await nodes.fetch_data()
-    return locations_jq.input(data).all()
+    return locations_jq.input(data).first()
 
 
 latest_jq = jq.compile(
@@ -154,5 +156,5 @@ latest_jq = jq.compile(
 @router.get("/latest")
 async def get_data(nodes: Nodes = Depends()):
     data = await nodes.fetch_data()
-    ret = latest_jq.input(data).all()
+    ret = latest_jq.input(data).first()
     return ret

@@ -4,6 +4,7 @@ from pydantic import BaseSettings
 
 class Settings(BaseSettings):
     DATABASE_URL: str
+    DATABASE_WRITE_URL: str
 
     class Config:
         env_file = ".env"

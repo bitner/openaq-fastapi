@@ -24,8 +24,8 @@ setuptools.setup(
 
     author="author",
 
-    package_dir={"": "api"},
-    packages=setuptools.find_packages(where="api"),
+    # package_dir={"": "../openaq_fastapi"},
+    # packages=setuptools.find_packages(where="openaq_fastapi"),
 
     install_requires=install_requires,
 

@@ -4,7 +4,8 @@ import time
 import orjson as json
 from fastapi import APIRouter, Depends
 
-from .base import DB, Filters, MeasurementPaging
+from .base import DB, MeasurementFilters, MeasurementPaging
+from datetime import timedelta
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -16,7 +17,7 @@ router = APIRouter()
 async def locations_get(
     db: DB = Depends(),
     paging: MeasurementPaging = Depends(),
-    filters: Filters = Depends(),
+    filters: MeasurementFilters = Depends(),
 ):
     start = time.time()
     paging_q = await paging.sql()
@@ -25,12 +26,14 @@ async def locations_get(
     date_to = paging.date_to
     date_from_adj = paging.date_from_adj
     date_to_adj = paging.date_to_adj
+    include_fields_q = await filters.measurement_fields()
 
     params = {
         "date_to": date_to,
         "date_from": date_from,
         "date_to_adj": date_to_adj,
         "date_from_adj": date_from_adj,
+        "totalrows": paging.totalrows,
     }
     params.update(paging_q["params"])
     params.update(where_q["params"])
@@ -38,74 +41,158 @@ async def locations_get(
     where_sql = where_q["q"]
     paging_sql = paging_q["q"]
 
-    monthly_count_q = f"""
-        SELECT
-            sum(value_count) as cnt
-        FROM
-            measurements_web_base
-            LEFT JOIN sensors_monthly USING (sensors_id)
+    # monthly_count_q = f"""
+    #     WITH base AS (
+    #         SELECT
+    #             month,
+    #             sum(value_count) as cnt
+    #         FROM
+    #             measurements_web_base
+    #             LEFT JOIN sensors_monthly USING (sensors_id)
+    #         WHERE
+    #             month >= :date_from::timestamptz
+    #             AND
+    #             month <= :date_to::timestamptz - '1 month'::interval
+    #             AND
+    #             {where_sql}
+    #         GROUP BY 1 ORDER BY 1 DESC
+    #     ),
+    #     subgroups AS (
+    #         SELECT
+    #             month,
+    #             --sum(cnt) OVER () AS total,
+    #             sum(cnt) OVER (
+    #                 ORDER BY month DESC
+    #                 ROWS BETWEEN
+    #                 UNBOUNDED PRECEDING
+    #                 AND
+    #                 CURRENT ROW) AS running
+    #         FROM base
+    #     ),
+    #     gtmonth AS (
+    #     SELECT month, running FROM subgroups WHERE running>:totalrows
+    #     ORDER BY 1 DESC LIMIT 1 )
+    #     SELECT
+    #         sum(cnt) as total,
+    #         CASE WHEN gtmonth.month IS NOT NULL THEN gtmonth.month ELSE :date_from::timestamptz END as month
+    #     FROM
+    #         base, gtmonth
+    #     GROUP BY base.month, gtmonth.month
+    #     UNION ALL SELECT 0, :date_from::timestamptz
+    #     ORDER BY total desc limit 1;
+    #     """
+
+    estimated_count_q = f"""
+        EXPLAIN (FORMAT JSON)
+        SELECT 1 FROM measurements_web
         WHERE
-            month >= :date_from::timestamptz
+            datetime >= :date_from::timestamptz
             AND
-            month <= :date_to::timestamptz - '1 month'::interval
+            datetime <= :date_to::timestamptz
             AND
             {where_sql}
+        ;
         """
 
-    monthly_count = await db.fetchval(monthly_count_q, params)
-    if not monthly_count:
-        monthly_count = 0
+    estimate_j = await db.fetchval(estimated_count_q, params)
+    count = json.loads(estimate_j)[0]['Plan']['Plan Rows']
+    logger.debug(f"Estimate: {count}")
 
-    remainder_count_q = f"""
-        SELECT
-            count(*) as cnt
-        FROM measurements_web
+    # get estimated count for adjusted date to see if we need to widen the window
+    estimated_count_q = f"""
+        EXPLAIN (FORMAT JSON)
+        SELECT 1 FROM measurements_web
         WHERE
-            (
-                datetime <
-                date_trunc('month', :date_from::timestamptz)
-                + '1 month'::interval
-                OR
-                datetime >
-                date_trunc('month', :date_to::timestamptz)
-            )
+            datetime >= :date_from_adj::timestamptz
             AND
-                datetime >= :date_from::timestamptz
+            datetime <= :date_to_adj::timestamptz
             AND
-                datetime < :date_to::timestamptz
-            AND {where_sql}
+            {where_sql}
+        ;
         """
 
-    remainder_count = await db.fetchval(remainder_count_q, params)
-    if not remainder_count:
-        remainder_count = 0
+    estimate_j = await db.fetchval(estimated_count_q, params)
+    limcount = json.loads(estimate_j)[0]['Plan']['Plan Rows']
+    logger.debug(f"Estimate: {limcount}")
 
-    count = monthly_count + remainder_count
+    tries = 0;
+    while count > 0 and limcount < 100000 and tries < 10:
+        date_from_adj = date_from_adj - timedelta(days=pow(3,tries))
+        params['date_from_adj'] = date_from_adj
+        estimate_j = await db.fetchval(estimated_count_q, params)
+        limcount = json.loads(estimate_j)[0]['Plan']['Plan Rows']
+        logger.debug(f"Estimate: {limcount}")
+        tries += 1
+
+
+
+    # monthly_count_q = f"""
+    #     SELECT
+    #         sum(value_count) as cnt
+    #     FROM
+    #         measurements_web_base
+    #         LEFT JOIN sensors_monthly USING (sensors_id)
+    #     WHERE
+    #         month >= :date_from::timestamptz
+    #         AND
+    #         month <= :date_to::timestamptz - '1 month'::interval
+    #         AND
+    #         {where_sql}
+    #     ;
+    #     """
+
+    # monthly_row = await db.fetchrow(monthly_count_q, params)
+    # # logger.debug(f"monthly row {monthly_row['total']} {monthly_row['month']}")
+    # monthly_count = monthly_row['cnt']
+    # # if monthly_row['month']:
+    # #     date_from_adj = monthly_row['month']
+    # #     params['date_from_adj'] = date_from_adj
+    # if not monthly_count:
+    #     monthly_count = 0
+
+    # remainder_count_q = f"""
+    #     SELECT
+    #         sum(value_count) as cnt
+    #     FROM measurements_web_base
+    #     LEFT JOIN sensors_daily USING (sensors_id)
+    #     WHERE
+    #             day >= date_trunc('month', :date_to::timestamptz)
+    #         AND
+    #             day < :date_to::timestamptz
+    #         AND {where_sql}
+    #     """
+
+    # remainder_count = await db.fetchval(remainder_count_q, params)
+    # if not remainder_count:
+    #     remainder_count = 0
+
+    # count = monthly_count + remainder_count
 
     if count > 0:
         q = f"""
+        WITH t AS (
             SELECT
+                site_name as location,
+                measurand as parameter,
                 json_build_object(
-                    'location', site_name,
-                    'parameter', measurand,
-                    'date',json_build_object(
                                 'utc', datetime
-                            ),
-                    'value', value,
-                    'unit', units,
-                    'coordinates', json_build_object(
+                            ) as date,
+                units as unit,
+                json_build_object(
                             'latitude', lat,
                             'longitude', lon
-                        ),
-                    'country', country,
-                    'city', city
-                ) as json
+                        ) as coordinates,
+                country,
+                city
+                {include_fields_q}
             FROM measurements_web
             WHERE {where_sql}
             AND datetime
             BETWEEN :date_from_adj::timestamptz
             AND :date_to_adj::timestamptz
             {paging_sql}
+            )
+            SELECT row_to_json(t) as json FROM t;
         """
 
         rows = await db.fetch(q, params)
@@ -120,7 +207,7 @@ async def locations_get(
         "website": "https://docs.openaq.org/",
         "page": paging.page,
         "limit": paging.limit,
-        "found": monthly_count + remainder_count,
+        "found": count,
     }
 
     logger.debug("Total Time: %s", time.time() - start)

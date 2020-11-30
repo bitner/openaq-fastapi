@@ -13,6 +13,7 @@ from .middleware import CacheControlMiddleware, TotalTimeMiddleware
 from .routers.averages import router as averages_router
 from .routers.measurements import router as measurements_router
 from .routers.nodes import router as nodes_router
+from .routers.lookups import router as lookups_router
 from .settings import settings
 
 logger = logging.getLogger("locations")
@@ -77,6 +78,7 @@ def pong():
 app.include_router(nodes_router)
 app.include_router(measurements_router)
 app.include_router(averages_router)
+app.include_router(lookups_router)
 
 handler = Mangum(app, enable_lifespan=False)
 
