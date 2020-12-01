@@ -41,6 +41,43 @@ async def locations_get(
     where_sql = where_q["q"]
     paging_sql = paging_q["q"]
 
+    summary_q = f"""
+        SELECT
+            sum(value_count) as count,
+            min(first_datetime) as first,
+            max(last_datetime) as last
+        FROM sensors_total
+        LEFT JOIN sensors_first_last USING (sensors_id)
+        LEFT JOIN sensors USING (sensors_id)
+        LEFT JOIN sensor_systems USING (sensor_systems_id)
+        LEFT JOIN sensor_nodes USING (sensor_nodes_id)
+        LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
+        LEFT JOIN measurands USING (measurands_id)
+        WHERE {where_sql}
+        """
+    summary = await db.fetchrow(summary_q, params)
+    if summary is None:
+        return {"error": "no sensors found matching search"}
+
+    logger.debug('total_count %s, min %s, max %s', summary[0], summary[1], summary[2])
+
+    if summary[1] > date_from:
+        date_from = summary[1]
+    if summary[1] > date_from_adj:
+        date_from_adj = summary[1]
+    if summary[2] < date_to:
+        date_to = summary[2]
+    if summary[2] < date_to_adj:
+        date_to_adj = summary[2]
+
+    date_from_adj = date_to_adj - timedelta(days=3)
+    params.update( {
+        "date_to": date_to,
+        "date_from": date_from,
+        "date_to_adj": date_to_adj,
+        "date_from_adj": date_from_adj
+    })
+
     # monthly_count_q = f"""
     #     WITH base AS (
     #         SELECT
@@ -98,31 +135,31 @@ async def locations_get(
     count = json.loads(estimate_j)[0]['Plan']['Plan Rows']
     logger.debug(f"Estimate: {count}")
 
-    # get estimated count for adjusted date to see if we need to widen the window
-    estimated_count_q = f"""
-        EXPLAIN (FORMAT JSON)
-        SELECT 1 FROM measurements_web
-        WHERE
-            datetime >= :date_from_adj::timestamptz
-            AND
-            datetime <= :date_to_adj::timestamptz
-            AND
-            {where_sql}
-        ;
-        """
+    # # get estimated count for adjusted date to see if we need to widen the window
+    # estimated_count_q = f"""
+    #     EXPLAIN (FORMAT JSON)
+    #     SELECT 1 FROM measurements_web
+    #     WHERE
+    #         datetime >= :date_from_adj::timestamptz
+    #         AND
+    #         datetime <= :date_to_adj::timestamptz
+    #         AND
+    #         {where_sql}
+    #     ;
+    #     """
 
-    estimate_j = await db.fetchval(estimated_count_q, params)
-    limcount = json.loads(estimate_j)[0]['Plan']['Plan Rows']
-    logger.debug(f"Estimate: {limcount}")
+    # estimate_j = await db.fetchval(estimated_count_q, params)
+    # limcount = json.loads(estimate_j)[0]['Plan']['Plan Rows']
+    # logger.debug(f"Estimate: {limcount}")
 
-    tries = 0;
-    while count > 0 and limcount < 100000 and tries < 10:
-        date_from_adj = date_from_adj - timedelta(days=pow(3,tries))
-        params['date_from_adj'] = date_from_adj
-        estimate_j = await db.fetchval(estimated_count_q, params)
-        limcount = json.loads(estimate_j)[0]['Plan']['Plan Rows']
-        logger.debug(f"Estimate: {limcount}")
-        tries += 1
+    # tries = 0;
+    # while count > 0 and limcount < 100000 and tries < 10:
+    #     date_from_adj = date_from_adj - timedelta(days=pow(3,tries))
+    #     params['date_from_adj'] = date_from_adj
+    #     estimate_j = await db.fetchval(estimated_count_q, params)
+    #     limcount = json.loads(estimate_j)[0]['Plan']['Plan Rows']
+    #     logger.debug(f"Estimate: {limcount}")
+    #     tries += 1
 
 
 
@@ -174,14 +211,11 @@ async def locations_get(
             SELECT
                 site_name as location,
                 measurand as parameter,
-                json_build_object(
-                                'utc', datetime
-                            ) as date,
+                datetime,
+                json->>'timezone' as timezone,
+                lat,
+                lon,
                 units as unit,
-                json_build_object(
-                            'latitude', lat,
-                            'longitude', lon
-                        ) as coordinates,
                 country,
                 city
                 {include_fields_q}
@@ -191,8 +225,25 @@ async def locations_get(
             BETWEEN :date_from_adj::timestamptz
             AND :date_to_adj::timestamptz
             {paging_sql}
+            ), t1 AS (
+                SELECT
+                    location,
+                    parameter,
+                    json_build_object(
+                                'utc', format_timestamp(datetime, 'UTC'),
+                                'local', format_timestamp(datetime, timezone)
+                            ) as date,
+                    unit,
+                    json_build_object(
+                            'latitude', lat,
+                            'longitude', lon
+                        ) as coordinates,
+                    country,
+                    city
+                    {include_fields_q}
+                FROM t
             )
-            SELECT row_to_json(t) as json FROM t;
+            SELECT row_to_json(t1) as json FROM t1;
         """
 
         rows = await db.fetch(q, params)

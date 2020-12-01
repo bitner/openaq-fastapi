@@ -1,9 +1,11 @@
 import logging
 import time
+import re
 from typing import Optional
 
 import orjson as json
 from fastapi import APIRouter, Depends, Query
+from datetime import timedelta
 
 from .base import DB, MeasurementFilters, MeasurementPaging, Spatial, Temporal
 
@@ -18,8 +20,8 @@ async def locations_get(
     db: DB = Depends(),
     paging: MeasurementPaging = Depends(),
     filters: MeasurementFilters = Depends(),
-    spatial: Optional[Spatial] = Query("country"),
-    temporal: Optional[Temporal] = Query("year"),
+    spatial: Spatial = Query(...),
+    temporal: Temporal = Query(...),
 ):
     start = time.time()
     paging_q = await paging.sql()
@@ -43,9 +45,48 @@ async def locations_get(
     where_sql = where_q["q"]
     paging_sql = paging_q["q"]
 
+    summary_q = f"""
+        SELECT
+            sum(value_count) as count,
+            min(first_datetime) as first,
+            max(last_datetime) as last
+        FROM sensors_total
+        LEFT JOIN sensors_first_last USING (sensors_id)
+        LEFT JOIN sensors USING (sensors_id)
+        LEFT JOIN sensor_systems USING (sensor_systems_id)
+        LEFT JOIN sensor_nodes USING (sensor_nodes_id)
+        LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
+        LEFT JOIN measurands USING (measurands_id)
+        WHERE {where_sql}
+        """
+    summary = await db.fetchrow(summary_q, params)
+    if summary is None:
+        return {"error": "no sensors found matching search"}
+
+    logger.debug('total_count %s, min %s, max %s', summary[0], summary[1], summary[2])
+
+    if summary[1] > date_from:
+        date_from = summary[1]
+    if summary[1] > date_from_adj:
+        date_from_adj = summary[1]
+    if summary[2] < date_to:
+        date_to = summary[2]
+    if summary[2] < date_to_adj:
+        date_to_adj = summary[2]
+
+    date_from_adj = date_to_adj - timedelta(days=3)
+    params.update( {
+        "date_to": date_to,
+        "date_from": date_from,
+        "date_to_adj": date_to_adj,
+        "date_from_adj": date_from_adj
+    })
+
     if spatial == 'project':
        spatial='source_name'
 
+    count_q = 'value_count'
+    sum_q = 'value_sum'
 
 
     temporal_col = temporal_q = temporal_order = f"{temporal}::date"
@@ -65,9 +106,17 @@ async def locations_get(
         temporal_col = "to_char(day, 'Dy')"
         temporal_order = "to_char(day, 'ID')"
         temporal_q = "day"
+    elif temporal == "hour":
+        table = "measurements"
+        temporal_q = "datetime"
+        temporal_order = temporal_col = "date_trunc('hour', datetime)"
+        count_q = '1::int as value_count'
+        sum_q = 'value as value_sum'
 
     else:
         raise Exception
+
+
 
 
     base_obj = [
@@ -86,7 +135,7 @@ async def locations_get(
 
     if spatial == 'source_name':
         base_obj.extend([
-            "'source_name'", "source_name"
+            "'project'", "source_name"
         ])
         cols.append('source_name')
 
@@ -98,7 +147,7 @@ async def locations_get(
 
     if spatial == 'location':
         spatial = "site_name"
-        cols.append(["site_name", "lat", "lon"])
+        cols.extend(["site_name", "lat", "lon"])
         base_obj.extend([
             "'location'", "site_name",
             "'coordinates'",
@@ -124,8 +173,8 @@ async def locations_get(
                 measurand,
                 units,
                 {spatial_sql},
-                value_count,
-                value_sum
+                {count_q},
+                {sum_q}
             FROM
                 measurements_web_base b
                 LEFT JOIN {table} t USING (sensors_id)

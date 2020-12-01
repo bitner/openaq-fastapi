@@ -278,8 +278,8 @@ async def projects_get(
         q = f"""
         WITH t AS (
         SELECT
-            source_name as "projectId",
-            source_name as "projectName",
+            source_name as "id",
+            source_name as "name",
             coalesce(sources.data->>'name', n.metadata->>'sensor_node_source_fullname') as subtitle,
             sum(value_count) as count,
             to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
@@ -373,7 +373,7 @@ async def projects_get(
                 sum(value_sum) / sum(value_count) as average,
                 to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
                 to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-                last(last_value, last_datetime) as lastValue,
+                last(last_value, last_datetime) as "lastValue",
                 count(*) as locations
             FROM
             base

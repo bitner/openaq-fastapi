@@ -13,3 +13,4 @@ orjson
 msgpack
 asyncpg
 uvicorn
+pytz

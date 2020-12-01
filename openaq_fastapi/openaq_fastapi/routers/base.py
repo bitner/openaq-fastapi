@@ -12,6 +12,9 @@ from buildpg import S, V, funcs, logic, render
 from fastapi import Depends, Query, Request
 from pydantic import BaseModel, validator
 
+import re
+import pytz
+
 logger = logging.getLogger("base")
 logger.setLevel(logging.DEBUG)
 
@@ -41,6 +44,8 @@ class Order(str, Enum):
     locations = "locations"
     firstUpdated = "firstUpdated"
     lastUpdated = "lastUpdated"
+    name = "name"
+    id = "id"
 
 
 class Spatial(str, Enum):
@@ -56,6 +61,9 @@ class Temporal(str, Enum):
     year = "year"
     moy = "moy"
     dow = "dow"
+    hour = "hour"
+
+
 
 
 class IncludeFields(str, Enum):
@@ -127,7 +135,7 @@ class MeasurementPaging:
         sort: Optional[Sort] = Query("desc"),
         order_by: Optional[Order] = Query("datetime"),
         date_from: Union[datetime, date, None] = date.fromisoformat(
-            "2013-01-01"
+            "2006-01-01"
         ),
         date_to: Union[datetime, date, None] = datetime.utcnow(),
     ):
@@ -136,7 +144,7 @@ class MeasurementPaging:
         self.sort = sort
         self.order_by = order_by
         df = datetime(
-            *date_from.timetuple()[:-6]
+            *date_from.timetuple()[:-6],
         )
         df -= timedelta(
             minutes=df.minute % 15,
@@ -144,15 +152,15 @@ class MeasurementPaging:
             microseconds=df.microsecond
         )
         dt = datetime(
-            *date_to.timetuple()[:-6]
+            *date_to.timetuple()[:-6],
         )
         dt -= timedelta(
             minutes=dt.minute % 15,
             seconds=dt.second,
             microseconds=dt.microsecond
         )
-        self.date_from = self.date_from_adj = df
-        self.date_to = self.date_to_adj = dt
+        self.date_from = self.date_from_adj = df.replace(tzinfo=pytz.UTC)
+        self.date_to = self.date_to_adj = dt.replace(tzinfo=pytz.UTC)
         self.offset = (self.page - 1) * self.limit
         self.totalrows = self.limit + self.offset
 
@@ -315,7 +323,18 @@ class Filters:
         geo: Geo = Depends(),
     ):
         self.country = country
-        self.site_name = site_name
+
+        self.sensor_nodes_id = None
+        self.site_name = None
+        r = re.compile(r'^\d+$')
+        if site_name is not None:
+            nodes_list = list(filter(r.match, site_name))
+            logger.debug(f'NODES: {nodes_list} len: {len(nodes_list)} {len(site_name)}')
+            if len(nodes_list) > 0 and len(nodes_list) == len(site_name):
+                self.sensor_nodes_id = [int(s) for s in site_name]
+            else:
+                self.site_name = site_name
+
         self.city = city
         self.measurand = measurand
         self.coordinates = geo.coordinates
@@ -323,6 +342,7 @@ class Filters:
         self.radius = geo.radius
         self.include_fields = include_fields
         self.project = project
+        self.source_name = project
 
     def get_measurement_q(self):
         if self.measurand:
@@ -346,11 +366,15 @@ class Filters:
         site_names_clause = await overlaps(
             "site_names", "site_name", self.site_name
         )
+        sensor_nodes_id_clause = await isin(
+            "sensor_nodes_id", "sensor_nodes_id", self.sensor_nodes_id
+        )
         country_clause = await isin("country", "country", self.country)
         project_clause = await isin('source_name', 'project', self.project)
         cities_clause = await overlaps("cities", "city", self.city)
 
         wheres.append(self.get_measurement_q())
+        wheres.append(sensor_nodes_id_clause)
         wheres.append(site_names_clause)
         wheres.append(country_clause)
         wheres.append(cities_clause)
@@ -401,7 +425,7 @@ class MeasurementFilters(Filters):
     async def sql(self):
         wheres = []
         params = {}
-        for p in ['city', 'country', 'measurand', 'site_name']:
+        for p in ['city', 'country', 'measurand', 'site_name', 'sensor_nodes_id', 'source_name']:
             vals = getattr(self, p)
             if vals is not None:
                 wheres.append({
