@@ -27,19 +27,21 @@ def max_wait():
     return 4
 
 
-def test_ok_status(url_list):
+def test_ok_status(url_list, max_wait):
     """
-    Confirm that frequently used URLs return OK status codes
+    Assert 1 - Confirm that frequently used URLs return OK status codes
+    Assert 2 - Confirm that frequently used URLs respond within our desired time window
     """
     for url in url_list:
         r = requests.get(url)
         assert r.status_code == requests.codes.ok
-
-
-def test_speed(url_list, max_wait):
-    """
-    Confirm that frequently used URLs respond within our desired time window
-    """
-    for url in url_list:
-        r = requests.get(url)
         assert r.elapsed.total_seconds() < max_wait
+
+
+# def test_speed(url_list, max_wait):
+#     """
+#     Confirm that frequently used URLs respond within our desired time window
+#     """
+#     for url in url_list:
+#         r = requests.get(url)
+#         assert r.elapsed.total_seconds() < max_wait
