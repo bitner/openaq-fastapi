@@ -408,15 +408,34 @@ async def projects_get(
         return {"meta": meta, "results": json_rows}
 
 @router.get("/locations/{location_id}")
+@router.get("/v2/locations/{location_id}")
+@router.get("/v2/locations")
 async def locations_get(
-    location_id: int,
     db: DB = Depends(),
+    paging: Paging = Depends(Paging),
+    filters: Filters = Depends(Filters),
+    location_id: Optional[int] = None,
 ):
+    logger.debug(f"{paging} {filters}")
+    paging_q = await paging.sql_loc()
+    where_q = await filters.sql()
+    params = {
+        'sensor_nodes_id': location_id
+    }
+    location_sql = ''
+    if location_id is not None:
+        location_sql = ' AND id=:sensor_nodes_id '
+    params.update(paging_q["params"])
+    params.update(where_q["params"])
 
-        params = {'location_id':location_id}
-        q = """
+    where_sql = where_q["q"]
+    paging_sql = paging_q["q"]
+
+    oq = f"""
         WITH base AS (
-            SELECT *, sensor_nodes.geom as sgeom
+            SELECT
+                *,
+                sensor_nodes.geom as sgeom
             FROM
             sensors_total
             LEFT JOIN sensors_first_last USING (sensors_id)
@@ -426,62 +445,114 @@ async def locations_get(
             LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
             LEFT JOIN measurands USING (measurands_id)
             WHERE
-            sensor_nodes_id=:location_id
+            {where_sql}
+            {location_sql}
         ),
+        nsensors AS (
+            select count(*) FROM base GROUP BY sensor_nodes_id
+            ),
         overall AS (
         SELECT
-            sensor_systems_id as "id",
+            sensor_nodes_id as "id",
             site_name as "name",
+            json->>'source_type' as "sourceType",
+            ismobile as "isMobile",
             city,
             country,
+            source_name,
             jsonb_build_object(
                 'longitude', st_x(sgeom),
                 'latitude', st_y(sgeom)
             ) as coordinates,
             sum(value_count) as measurements,
-            to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-            to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated"
+            min(first_datetime) as "firstUpdated",
+            max(last_datetime) as "lastUpdated",
+            json
         FROM base
-        group by id, name,city,country, 5
+        group by id, name,city,country,coordinates,json,source_name,"sourceType","isMobile"
+        {paging_sql}
         ),
         byparameter AS (
             SELECT
+                sensors_id as id,
+                sensor_nodes_id,
                 measurand,
                 units as unit,
-                sum(value_count) as count,
-                sum(value_sum) / sum(value_count) as average,
-                to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-                to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-                last(last_value, last_datetime) as "lastValue",
-                count(*) as locations
+                value_count as count,
+                value_sum / value_count as average,
+                first_datetime as "firstUpdated",
+                last_datetime as "lastUpdated",
+                last_value as "lastValue"
             FROM
             base
-            GROUP BY measurand, units
         ),
-        sources AS (
-            SELECT jsonb_agg(data) as sources FROM sources WHERE source_name IN (SELECT distinct source_name FROM base)
-        ), t1 AS
-        (
+        t1 AS (
         SELECT
             overall.*,
-            jsonb_agg(to_jsonb(byparameter)) as parameters,
-            sources
-        FROM overall, byparameter, sources
-        GROUP BY id, name,city,country, coordinates, overall."firstUpdated", overall."lastUpdated", 6 , sources
-        ) SELECT to_jsonb(t1) as json FROM t1 group by t1
+            sources.data::jsonb as sources,
+            jsonb_agg(to_jsonb(byparameter) - '{{sensor_nodes_id}}'::text[]) as parameters
+        FROM overall
+        LEFT JOIN sources USING (source_name)
+        LEFT JOIN byparameter ON (overall.id=sensor_nodes_id)
+        GROUP BY
+            overall.id,
+            name,
+            city,
+            country,
+            coordinates,
+            overall."firstUpdated",
+            overall."lastUpdated",
+            "sourceType",
+            "isMobile",
+            overall.source_name,
+            measurements,
+            json,
+            sources.data::jsonb
 
+        ), t2 AS (
+        SELECT to_jsonb(t1) - '{{json,nsensors,source_name}}'::text[] as json
+        FROM t1 group by t1, json
+        )
+        SELECT *, count FROM t2, nsensors
+        ;
+    """
+
+    q = f"""
+        WITH t1 AS (
+            SELECT *
+            FROM locations_base_v2
+            WHERE
+            {where_sql}
+            {location_sql}
+            {paging_sql}
+        ),
+        nodes AS (
+            SELECT count(distinct id) as nodes
+            FROM locations_base_v2
+            WHERE
+            {where_sql}
+            {location_sql}
+        ),
+        t2 AS (
+        SELECT to_jsonb(t1) - '{{json,source_name}}'::text[] as json
+        FROM t1 group by t1, json
+        )
+        SELECT t2.*, nodes as count FROM t2, nodes
+
+        ;
         """
 
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/"
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        # meta["found"] = rows[0]["count"]
-        json_rows = [json.loads(r['json']) for r in rows]
+    meta = {
+        "name": "openaq-api",
+        "license": "CC BY 4.0",
+        "website": "https://docs.openaq.org/",
+        "found": 0
+    }
+    rows = await db.fetch(q, params)
+    if len(rows) == 0:
+        meta["found"] = 0
+        return {"meta": meta, "results": []}
+    meta["found"] = rows[0]["count"]
+    json_rows = [json.loads(r['json']) for r in rows]
 
-        return {"meta": meta, "results": json_rows}
+    return {"meta": meta, "results": json_rows}

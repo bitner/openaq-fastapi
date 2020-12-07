@@ -512,9 +512,13 @@ def load_fetch_day(day):
     conn = boto3.client('s3')
     prefix=f'realtime-gzipped/{day}'
     keys=[]
-    for f in conn.list_objects(Bucket=AWS_BUCKET, Prefix=prefix)['Contents']:
-        # print(f['Key'])
-        keys.append(f['Key'])
+    try:
+        for f in conn.list_objects(Bucket=AWS_BUCKET, Prefix=prefix)['Contents']:
+            # print(f['Key'])
+            keys.append(f['Key'])
+    except:
+        print(f'no data found for {day}')
+        return None
 
 
     with psycopg2.connect(

@@ -1,6 +1,8 @@
 import logging
 import time
 from datetime import date, datetime, timedelta
+from dateutil.parser import parse
+from dateutil.tz import UTC
 from enum import Enum
 from math import ceil
 from typing import List, Optional, Union
@@ -46,6 +48,7 @@ class Order(str, Enum):
     lastUpdated = "lastUpdated"
     name = "name"
     id = "id"
+    measurements = "measurements"
 
 
 class Spatial(str, Enum):
@@ -124,6 +127,58 @@ class Paging:
                 "limit": self.limit,
             },
         }
+    async def sql_loc(self):
+        order_by = self.order_by
+        sort = str.lower(self.sort)
+        if order_by in ['count', 'measurements']:
+            q = 'measurements'
+        elif order_by in ['lastUpdated']:
+            q = '"lastUpdated"'
+        elif order_by in ['firstUpdated']:
+            q = '"firstUpdated"'
+        else:
+            q = f'"{order_by}"'
+        if sort == "asc":
+            order = f" ORDER BY {q} ASC "
+        else:
+            order = f" ORDER BY {q} DESC NULLS LAST "
+        offset = (self.page - 1) * self.limit
+        return {
+            "q": f"{order} OFFSET :offset LIMIT :limit",
+            "params": {
+                "order_by": order_by,
+                "offset": offset,
+                "limit": self.limit,
+            },
+        }
+
+
+def fix_datetime(
+    d: Union[datetime, date, str, int, None],
+    minutes_to_round_to: Optional[int] = None
+):
+    # Make sure that date/datetime is turned into timzone
+    # aware datetime optionally rounding to
+    # given number of minutes
+    if d is None:
+        return None
+    if isinstance(d, str):
+        d = parse(d)
+    if isinstance(d, int):
+        d = datetime.fromtimestamp(d)
+    if isinstance(d, date):
+        d = datetime(
+            *d.timetuple()[:-6],
+        )
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=UTC)
+    if minutes_to_round_to is not None:
+        d -= timedelta(
+            minutes=d.minute % minutes_to_round_to,
+            seconds=d.second,
+            microseconds=d.microsecond
+        )
+    return d
 
 
 
@@ -134,55 +189,23 @@ class MeasurementPaging:
         page: Optional[int] = Query(1, gt=0),
         sort: Optional[Sort] = Query("desc"),
         order_by: Optional[Order] = Query("datetime"),
-        date_from: Union[datetime, date, None] = date.fromisoformat(
-            "2006-01-01"
-        ),
-        date_to: Union[datetime, date, None] = datetime.utcnow(),
+        date_from: Union[datetime, date, None] = None,
+        date_to: Union[datetime, date, None] = None,
     ):
         self.limit = limit
         self.page = page
         self.sort = sort
         self.order_by = order_by
-        df = datetime(
-            *date_from.timetuple()[:-6],
-        )
-        df -= timedelta(
-            minutes=df.minute % 15,
-            seconds=df.second,
-            microseconds=df.microsecond
-        )
-        dt = datetime(
-            *date_to.timetuple()[:-6],
-        )
-        dt -= timedelta(
-            minutes=dt.minute % 15,
-            seconds=dt.second,
-            microseconds=dt.microsecond
-        )
-        self.date_from = self.date_from_adj = df.replace(tzinfo=pytz.UTC)
-        self.date_to = self.date_to_adj = dt.replace(tzinfo=pytz.UTC)
+
+        self.date_from = fix_datetime(date_from, 15)
+        self.date_to = fix_datetime(date_to, 15)
         self.offset = (self.page - 1) * self.limit
         self.totalrows = self.limit + self.offset
-
-
 
         logger.debug(
             "%s %s %s", date_from, date_to, (self.offset + limit) / 1000
         )
-        time_offset = timedelta(days=ceil((self.offset + limit) / 1000))
-        logger.debug(
-            "%s %s %s %s %s",
-            self.date_from,
-            self.date_to,
-            time_offset,
-            self.date_from_adj,
-            self.date_to_adj,
-        )
 
-        if sort == "desc":
-            self.date_from_adj = self.date_to - time_offset
-        else:
-            self.date_to_adj = self.date_from + time_offset
 
     async def sql(self):
         order_by = self.order_by
@@ -475,7 +498,7 @@ def dbkey(m, f, query, args):
     ).decode()
     dbkey = f"{query}{j}"
     h = hash(dbkey)
-    logger.debug(f"dbkey: {dbkey} h: {h}")
+    # logger.debug(f"dbkey: {dbkey} h: {h}")
     return h
 
 
@@ -497,7 +520,7 @@ class DB:
     @cached(900, **cache_config)
     async def fetch(self, query, kwargs):
         start = time.time()
-        logger.debug("Start time: %s", start)
+        logger.debug("Start time: %s Query: %s Args:%s", start, query, kwargs)
         rquery, args = render(query, **kwargs)
         r = await self.pool.fetch(rquery, *args)
         logger.debug(

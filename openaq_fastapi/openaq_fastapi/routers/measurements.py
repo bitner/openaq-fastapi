@@ -1,5 +1,6 @@
 import logging
 import time
+from dateutil.tz import UTC
 
 import orjson as json
 from fastapi import APIRouter, Depends
@@ -24,23 +25,17 @@ async def locations_get(
     where_q = await filters.sql()
     date_from = paging.date_from
     date_to = paging.date_to
-    date_from_adj = paging.date_from_adj
-    date_to_adj = paging.date_to_adj
     include_fields_q = await filters.measurement_fields()
-
-    params = {
-        "date_to": date_to,
-        "date_from": date_from,
-        "date_to_adj": date_to_adj,
-        "date_from_adj": date_from_adj,
-        "totalrows": paging.totalrows,
-    }
+    params={}
+    count = None
     params.update(paging_q["params"])
     params.update(where_q["params"])
 
     where_sql = where_q["q"]
     paging_sql = paging_q["q"]
 
+
+    # get overall summary numbers
     summary_q = f"""
         SELECT
             sum(value_count) as count,
@@ -60,17 +55,37 @@ async def locations_get(
         return {"error": "no sensors found matching search"}
 
     logger.debug('total_count %s, min %s, max %s', summary[0], summary[1], summary[2])
+    total_count = summary[0]
+    range_start = summary[1].replace(tzinfo=UTC)
+    range_end = summary[2].replace(tzinfo=UTC)
 
-    if summary[1] > date_from:
-        date_from = summary[1]
-    if summary[1] > date_from_adj:
-        date_from_adj = summary[1]
-    if summary[2] < date_to:
-        date_to = summary[2]
-    if summary[2] < date_to_adj:
-        date_to_adj = summary[2]
+    # if time is unbounded, we can just use the total count
+    if (date_from is None or date_from == range_start) and (date_to is None or date_to == range_end):
+        count = total_count
 
-    date_from_adj = date_to_adj - timedelta(days=3)
+    # snap date_from and date_to to the data range
+    if date_from is None:
+        date_from = date_from_adj = range_start
+    else:
+        date_from = date_from_adj = max(date_from, range_start)
+
+    if date_to is None:
+        date_to = date_to_adj = range_end
+    else:
+        date_to = date_to_adj = min(date_to, range_end)
+
+    # estimate time it would take to fulfill page requirements
+    # buffer by a factor of 10 for variability
+    delta = (range_end-range_start)/int(total_count) * int(paging.totalrows) * 10
+
+    # if we are ordering by time, keep us from searching everything
+    # for paging
+    if paging.order_by == 'datetime':
+        if paging.sort == 'asc':
+            date_to_adj = date_from_adj + delta
+        else:
+            date_from_adj  = date_to_adj - delta
+
     params.update( {
         "date_to": date_to,
         "date_from": date_from,
@@ -78,62 +93,24 @@ async def locations_get(
         "date_from_adj": date_from_adj
     })
 
-    # monthly_count_q = f"""
-    #     WITH base AS (
-    #         SELECT
-    #             month,
-    #             sum(value_count) as cnt
-    #         FROM
-    #             measurements_web_base
-    #             LEFT JOIN sensors_monthly USING (sensors_id)
-    #         WHERE
-    #             month >= :date_from::timestamptz
-    #             AND
-    #             month <= :date_to::timestamptz - '1 month'::interval
-    #             AND
-    #             {where_sql}
-    #         GROUP BY 1 ORDER BY 1 DESC
-    #     ),
-    #     subgroups AS (
-    #         SELECT
-    #             month,
-    #             --sum(cnt) OVER () AS total,
-    #             sum(cnt) OVER (
-    #                 ORDER BY month DESC
-    #                 ROWS BETWEEN
-    #                 UNBOUNDED PRECEDING
-    #                 AND
-    #                 CURRENT ROW) AS running
-    #         FROM base
-    #     ),
-    #     gtmonth AS (
-    #     SELECT month, running FROM subgroups WHERE running>:totalrows
-    #     ORDER BY 1 DESC LIMIT 1 )
-    #     SELECT
-    #         sum(cnt) as total,
-    #         CASE WHEN gtmonth.month IS NOT NULL THEN gtmonth.month ELSE :date_from::timestamptz END as month
-    #     FROM
-    #         base, gtmonth
-    #     GROUP BY base.month, gtmonth.month
-    #     UNION ALL SELECT 0, :date_from::timestamptz
-    #     ORDER BY total desc limit 1;
-    #     """
 
-    estimated_count_q = f"""
-        EXPLAIN (FORMAT JSON)
-        SELECT 1 FROM measurements_web
-        WHERE
-            datetime >= :date_from::timestamptz
-            AND
-            datetime <= :date_to::timestamptz
-            AND
-            {where_sql}
-        ;
-        """
+    # get estimated count
+    if count is None:
+        estimated_count_q = f"""
+            EXPLAIN (FORMAT JSON)
+            SELECT 1 FROM measurements_web
+            WHERE
+                datetime >= :date_from::timestamptz
+                AND
+                datetime <= :date_to::timestamptz
+                AND
+                {where_sql}
+            ;
+            """
 
-    estimate_j = await db.fetchval(estimated_count_q, params)
-    count = json.loads(estimate_j)[0]['Plan']['Plan Rows']
-    logger.debug(f"Estimate: {count}")
+        estimate_j = await db.fetchval(estimated_count_q, params)
+        count = json.loads(estimate_j)[0]['Plan']['Plan Rows']
+        logger.debug(f"Estimate: {count}")
 
     # # get estimated count for adjusted date to see if we need to widen the window
     # estimated_count_q = f"""

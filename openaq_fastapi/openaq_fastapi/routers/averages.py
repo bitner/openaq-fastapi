@@ -6,6 +6,7 @@ from typing import Optional
 import orjson as json
 from fastapi import APIRouter, Depends, Query
 from datetime import timedelta
+from dateutil.tz import UTC
 
 from .base import DB, MeasurementFilters, MeasurementPaging, Spatial, Temporal
 
@@ -16,7 +17,7 @@ router = APIRouter()
 
 
 @router.get("/averages")
-async def locations_get(
+async def averages_get(
     db: DB = Depends(),
     paging: MeasurementPaging = Depends(),
     filters: MeasurementFilters = Depends(),
@@ -28,8 +29,6 @@ async def locations_get(
     where_q = await filters.sql()
     date_from = paging.date_from
     date_to = paging.date_to
-    date_from_adj = paging.date_from_adj
-    date_to_adj = paging.date_to_adj
 
     params = {}
     params.update(paging_q["params"])
@@ -38,8 +37,6 @@ async def locations_get(
     params.update( {
         "date_to": date_to,
         "date_from": date_from,
-        "date_to_adj": date_to_adj,
-        "date_from_adj": date_from_adj,
     })
 
     where_sql = where_q["q"]
@@ -60,26 +57,27 @@ async def locations_get(
         WHERE {where_sql}
         """
     summary = await db.fetchrow(summary_q, params)
-    if summary is None:
+    if summary is None or summary[0] is None:
         return {"error": "no sensors found matching search"}
-
     logger.debug('total_count %s, min %s, max %s', summary[0], summary[1], summary[2])
+    total_count = summary[0]
+    range_start = summary[1].replace(tzinfo=UTC)
+    range_end = summary[2].replace(tzinfo=UTC)
 
-    if summary[1] > date_from:
-        date_from = summary[1]
-    if summary[1] > date_from_adj:
-        date_from_adj = summary[1]
-    if summary[2] < date_to:
-        date_to = summary[2]
-    if summary[2] < date_to_adj:
-        date_to_adj = summary[2]
+    if date_from is None:
+        date_from = range_start
+    else:
+        date_from = max(date_from, range_start)
 
-    date_from_adj = date_to_adj - timedelta(days=3)
+    if date_to is None:
+        date_to = range_end
+    else:
+        date_to = min(date_to, range_end)
+
+
     params.update( {
         "date_to": date_to,
         "date_from": date_from,
-        "date_to_adj": date_to_adj,
-        "date_from_adj": date_from_adj
     })
 
     if spatial == 'project':
@@ -269,6 +267,144 @@ async def locations_get(
     if len(rows) > 0:
         total = rows[0][0]
         json_rows = [json.loads(r["json"]) for r in rows]
+    else:
+        total = 0
+        json_rows = []
+
+    meta = {
+        "name": "openaq-api",
+        "license": "CC BY 4.0",
+        "website": "https://docs.openaq.org/",
+        "page": paging.page,
+        "limit": paging.limit,
+        "found": total,
+    }
+
+    logger.debug("Total Time: %s", time.time() - start)
+    return {"meta": meta, "results": json_rows}
+
+
+@router.get("/v2/averages")
+async def averages_v2_get(
+    db: DB = Depends(),
+    paging: MeasurementPaging = Depends(),
+    filters: MeasurementFilters = Depends(),
+    spatial: Spatial = Query(...),
+    temporal: Temporal = Query(...),
+):
+    start = time.time()
+    paging_q = await paging.sql()
+    where_q = await filters.sql()
+    date_from = paging.date_from
+    date_to = paging.date_to
+
+    params = {}
+    params.update(paging_q["params"])
+    params.update(where_q["params"])
+
+    params.update( {
+        "date_to": date_to,
+        "date_from": date_from,
+    })
+
+    where_sql = where_q["q"]
+    paging_sql = paging_q["q"]
+
+    summary_q = f"""
+        SELECT
+            sum(value_count) as count,
+            min(first_datetime) as first,
+            max(last_datetime) as last
+        FROM sensors_total
+        LEFT JOIN sensors_first_last USING (sensors_id)
+        LEFT JOIN sensors USING (sensors_id)
+        LEFT JOIN sensor_systems USING (sensor_systems_id)
+        LEFT JOIN sensor_nodes USING (sensor_nodes_id)
+        LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
+        LEFT JOIN measurands USING (measurands_id)
+        WHERE {where_sql}
+        """
+    summary = await db.fetchrow(summary_q, params)
+    if summary is None or summary[0] is None:
+        return {"error": "no sensors found matching search"}
+    logger.debug('total_count %s, min %s, max %s', summary[0], summary[1], summary[2])
+    total_count = summary[0]
+    range_start = summary[1].replace(tzinfo=UTC)
+    range_end = summary[2].replace(tzinfo=UTC)
+
+    if date_from is None:
+        date_from = range_start
+    else:
+        date_from = max(date_from, range_start)
+
+    if date_to is None:
+        date_to = range_end
+    else:
+        date_to = min(date_to, range_end)
+
+
+
+    spatial_disp = spatial
+    if spatial == 'project':
+       spatial='source_name'
+    if spatial == 'location':
+        spatial='self'
+        spatial_disp='location'
+    params.update( {
+        "date_to": date_to,
+        "date_from": date_from,
+        "spatial": spatial,
+        "spatial_disp": spatial_disp,
+        "temporal": temporal,
+        "order_by": 'd'
+    })
+
+    where = ''
+    if filters.measurand is not None:
+        where += ' AND measurand = ANY(:measurand) '
+
+    if filters.units is not None:
+        where += ' AND units = ANY(:units) '
+
+    if filters.country is not None and spatial == 'country':
+        where += ' AND name = ANY(:country) '
+
+    if filters.country is not None and spatial == '':
+        where += ' AND name = ANY(:country) '
+
+    q = f"""
+        WITH base AS (
+        SELECT
+            jsonb_build_object(
+                'parameter', measurand,
+                'unit', units,
+                :temporal::text, st::date,
+                :spatial_disp::text, name,
+                'subtitle', subtitle,
+                'measurement_count', value_count,
+                'average', round((value_sum/value_count)::numeric, 4)
+            ) || metadata as json
+        FROM rollups
+        LEFT JOIN groups_w_measurand USING (groups_id, measurands_id)
+        WHERE
+            rollup = :temporal::text
+            AND
+            type = :spatial::text
+            {where}
+        ORDER BY st DESC
+        OFFSET :offset
+        LIMIT :limit
+        )
+        SELECT json
+        FROM base;
+        """
+
+    rows = await db.fetch(q, params)
+
+    total = len(rows)
+
+    if total > 0:
+        json_rows = [json.loads(row[0]) for row in rows]
     else:
         total = 0
         json_rows = []

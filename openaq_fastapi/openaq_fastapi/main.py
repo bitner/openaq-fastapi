@@ -6,6 +6,7 @@ import orjson
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.openapi.models import Server
 from mangum import Mangum
 from starlette.responses import JSONResponse
 
@@ -24,11 +25,15 @@ class ORJSONResponse(JSONResponse):
     def render(self, content: Any) -> bytes:
         return orjson.dumps(content)
 
+servers = [{"url": "https://ytr9800fbk.execute-api.us-east-1.amazonaws.com/"}]
+
+
 
 app = FastAPI(
     title="OpenAQ",
     description="API for OpenAQ LCS",
     default_response_class=ORJSONResponse,
+    servers=servers,
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
