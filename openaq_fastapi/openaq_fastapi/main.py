@@ -10,7 +10,7 @@ from fastapi.openapi.models import Server
 from mangum import Mangum
 from starlette.responses import JSONResponse
 
-from .middleware import CacheControlMiddleware, TotalTimeMiddleware
+from .middleware import CacheControlMiddleware, TotalTimeMiddleware, StripParametersMiddleware
 from .routers.averages import router as averages_router
 from .routers.measurements import router as measurements_router
 from .routers.nodes import router as nodes_router
@@ -44,6 +44,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(StripParametersMiddleware)
 app.add_middleware(CacheControlMiddleware, cachecontrol="public, max-age=900")
 app.add_middleware(TotalTimeMiddleware)
 
