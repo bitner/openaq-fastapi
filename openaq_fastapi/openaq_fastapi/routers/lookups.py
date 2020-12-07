@@ -5,7 +5,9 @@ from typing import Optional
 import orjson as json
 from fastapi import APIRouter, Depends, Query
 
-from .base import DB, Filters, Paging, Spatial, Temporal
+from .base import DB, Filters, Paging, Spatial, Temporal, Sort
+from enum import Enum
+from typing import List, Optional
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -13,133 +15,246 @@ logger.setLevel(logging.DEBUG)
 router = APIRouter()
 
 
+class CitiesOrder(str, Enum):
+    city="city"
+    country="country"
+    count="count"
+    locations="locations"
+    firstUpdated= "firstUpdated"
+    lastUpdated = "lastUpdated"
+
 @router.get("/cities")
 async def cities_get(
     db: DB = Depends(),
-    paging: Paging = Depends(),
-    filters: Filters = Depends()
+    city: Optional[List[str]] = Query(None,),
+    country:Optional[List[str]] = Query(None, max_length=2),
+    order_by: Optional[CitiesOrder] = Query("city"),
+    sort: Optional[Sort] = Query("asc"),
+    limit: Optional[int] = Query(100, gt=0, le=10000),
+    page: Optional[int] = Query(1, gt=0, le=100),
 ):
-        paging_q = await paging.sql()
-        where_q = await filters.sql()
-        params = {}
-        params.update(paging_q["params"])
-        params.update(where_q["params"])
+    offset = (page - 1) * limit
+    where_sql = " TRUE "
+    if city is not None:
+        where_sql += " AND city = ANY(:city) "
+    if country is not None:
+        where_sql += " And country = ANY(:country) "
 
-        where_sql = where_q["q"]
-        paging_sql = paging_q["q"]
+    params={
+        "city": city,
+        "country": country,
+        "limit": limit,
+        "offset": offset,
+    }
 
-        q = f"""
-        WITH t AS (
-        SELECT
-            country,
-            city,
-            sum(value_count) as count,
-            count(*) as locations,
-            to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-            to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-            array_agg(DISTINCT measurand) as parameters
-        FROM sensors_total
-        LEFT JOIN sensors_first_last USING (sensors_id)
-        LEFT JOIN sensors USING (sensors_id)
-        LEFT JOIN sensor_systems USING (sensor_systems_id)
-        LEFT JOIN sensor_nodes USING (sensor_nodes_id)
-        LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
-        LEFT JOIN measurands USING (measurands_id)
-        WHERE
-        {where_sql}
-        GROUP BY
+    q = f"""
+    WITH t AS (
+    SELECT
         country,
-        city
-        ORDER BY country, city
+        city,
+        sum(value_count) as count,
+        count(*) as locations,
+        to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
+        to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
+        array_agg(DISTINCT measurand) as parameters
+    FROM sensors_total
+    LEFT JOIN sensors_first_last USING (sensors_id)
+    LEFT JOIN sensors USING (sensors_id)
+    LEFT JOIN sensor_systems USING (sensor_systems_id)
+    LEFT JOIN sensor_nodes USING (sensor_nodes_id)
+    LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
+    LEFT JOIN measurands USING (measurands_id)
+    WHERE
+    {where_sql}
+    GROUP BY
+    country,
+    city
+    ORDER BY "{order_by}" {sort}
+    OFFSET :offset
+    LIMIT :limit
+    )
+    SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
 
-        ), t1 as (
-        SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
-        )
-        {paging_sql}
+    """
 
-        """
+    meta = {
+        "name": "openaq-api",
+        "license": "CC BY 4.0",
+        "website": "https://docs.openaq.org/",
+        "page": page,
+        "limit": limit,
+        "found": None,
+    }
+    rows = await db.fetch(q, params)
+    if len(rows) == 0:
+        meta["found"] = 0
+        return {"meta": meta, "results": []}
+    meta["found"] = rows[0]["count"]
+    json_rows = [json.loads(r[1]) for r in rows]
 
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/",
-            "page": paging.page,
-            "limit": paging.limit,
-            "found": None,
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        meta["found"] = rows[0]["count"]
-        json_rows = [json.loads(r[1]) for r in rows]
+    return {"meta": meta, "results": json_rows}
 
-        return {"meta": meta, "results": json_rows}
+class CountriesOrder(str, Enum):
+    country="country"
+    firstUpdated= "firstUpdated"
+    lastUpdated = "lastUpdated"
 
 @router.get("/countries")
 async def countries_get(
     db: DB = Depends(),
-    paging: Paging = Depends(),
-    filters: Filters = Depends()
+    country:Optional[List[str]] = Query(None, max_length=2),
+    order_by: Optional[CountriesOrder] = Query("country"),
+    sort: Optional[Sort] = Query("asc"),
+    limit: Optional[int] = Query(100, gt=0, le=10000),
+    page: Optional[int] = Query(1, gt=0, le=100),
 ):
-        paging_q = await paging.sql()
-        where_q = await filters.sql()
-        params = {}
-        params.update(paging_q["params"])
-        params.update(where_q["params"])
+    offset = (page - 1) * limit
+    where_sql = " TRUE "
 
-        where_sql = where_q["q"]
-        paging_sql = paging_q["q"]
+    if country is not None:
+        where_sql += " And country = ANY(:country) "
 
-        q = f"""
-        WITH t AS (
-        SELECT
-            country as code,
-            name,
-            sum(value_count) as count,
-            count(*) as locations,
-            to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-            to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-            array_agg(DISTINCT measurand) as parameters
-        FROM sensors_total
-        LEFT JOIN sensors_first_last USING (sensors_id)
-        LEFT JOIN sensors USING (sensors_id)
-        LEFT JOIN sensor_systems USING (sensor_systems_id)
-        LEFT JOIN sensor_nodes USING (sensor_nodes_id)
-        LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
-        LEFT JOIN measurands USING (measurands_id)
-        LEFT JOIN countries ON (country=iso_a2)
-        WHERE
-        {where_sql}
-        GROUP BY
-        country,
-        name
-        ORDER BY country
+    params={
+        "country": country,
+        "limit": limit,
+        "offset": offset,
+    }
 
-        ), t1 AS
-        (
-        SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
-        ) SELECT * FROM t1
-        {paging_sql}
+    q = f"""
+    WITH t AS (
+    SELECT
+        country as code,
+        name,
+        sum(value_count) as count,
+        count(*) as locations,
+        to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
+        to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
+        array_agg(DISTINCT measurand) as parameters
+    FROM sensors_total
+    LEFT JOIN sensors_first_last USING (sensors_id)
+    LEFT JOIN sensors USING (sensors_id)
+    LEFT JOIN sensor_systems USING (sensor_systems_id)
+    LEFT JOIN sensor_nodes USING (sensor_nodes_id)
+    LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
+    LEFT JOIN measurands USING (measurands_id)
+    LEFT JOIN countries ON (country=iso_a2)
+    WHERE
+    {where_sql}
+    GROUP BY
+    1,2
+    ORDER BY "{order_by}" {sort}
+    OFFSET :offset
+    LIMIT :limit
+    )
+    SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
 
-        """
+    """
 
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/",
-            "page": paging.page,
-            "limit": paging.limit,
-            "found": None,
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        meta["found"] = rows[0]["count"]
-        json_rows = [json.loads(r[1]) for r in rows]
+    meta = {
+        "name": "openaq-api",
+        "license": "CC BY 4.0",
+        "website": "https://docs.openaq.org/",
+        "page": page,
+        "limit": limit,
+        "found": None,
+    }
+    rows = await db.fetch(q, params)
+    if len(rows) == 0:
+        meta["found"] = 0
+        return {"meta": meta, "results": []}
+    meta["found"] = rows[0]["count"]
+    json_rows = [json.loads(r[1]) for r in rows]
 
-        return {"meta": meta, "results": json_rows}
+    return {"meta": meta, "results": json_rows}
+
+
+
+class SourcesOrder(str, Enum):
+    source="sourceName"
+    firstUpdated= "firstUpdated"
+    lastUpdated = "lastUpdated"
+
+@router.get("/sources")
+async def sources_get(
+    db: DB = Depends(),
+    source_name:Optional[List[str]] = Query(
+        None,
+        aliases=('source', 'sourceName'),
+    ),
+    order_by: Optional[SourcesOrder] = Query("sourceName"),
+    sort: Optional[Sort] = Query("asc"),
+    limit: Optional[int] = Query(100, gt=0, le=10000),
+    page: Optional[int] = Query(1, gt=0, le=100),
+):
+    offset = (page - 1) * limit
+    where_sql = " TRUE "
+
+    if source_name is not None:
+        where_sql += " And country = ANY(:country) "
+
+    params={
+        "source_name": source_name,
+        "limit": limit,
+        "offset": offset,
+    }
+
+    q = f"""
+    WITH t AS (
+    SELECT
+        source_name as "sourceName",
+        data::jsonb as data,
+        sum(value_count) as count,
+        count(*) as locations,
+        to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
+        to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
+        array_agg(DISTINCT measurand) as parameters
+    FROM sources
+    LEFT JOIN sensor_nodes USING (source_name)
+    LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
+    LEFT JOIN sensor_systems USING (sensor_nodes_id)
+    LEFT JOIN sensors USING (sensor_systems_id)
+    LEFT JOIN sensors_total USING (sensors_id)
+    LEFT JOIN sensors_first_last USING (sensors_id)
+    LEFT JOIN measurands USING (measurands_id)
+    WHERE
+    {where_sql}
+    GROUP BY
+    1,2
+    ORDER BY "{order_by}" {sort}
+    OFFSET :offset
+    LIMIT :limit
+    )
+    SELECT count(*) OVER () as count,
+        (coalesce(data, '{{}}'::jsonb) || jsonb_build_object(
+            'count', count,
+            'locations', locations,
+            'firstUpdated', "firstUpdated",
+            'lastUpdated', "lastUpdated",
+            'parameters', parameters
+            )) as json FROM t
+
+    """
+
+    meta = {
+        "name": "openaq-api",
+        "license": "CC BY 4.0",
+        "website": "https://docs.openaq.org/",
+        "page": page,
+        "limit": limit,
+        "found": None,
+    }
+    rows = await db.fetch(q, params)
+    if len(rows) == 0:
+        meta["found"] = 0
+        return {"meta": meta, "results": []}
+    meta["found"] = rows[0]["count"]
+    json_rows = [json.loads(r[1]) for r in rows]
+
+    return {"meta": meta, "results": json_rows}
+
+
+
+
 
 @router.get("/sources")
 async def sources_get(
