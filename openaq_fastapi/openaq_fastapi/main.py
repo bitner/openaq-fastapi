@@ -25,7 +25,7 @@ class ORJSONResponse(JSONResponse):
     def render(self, content: Any) -> bytes:
         return orjson.dumps(content)
 
-servers = [{"url": "https://ytr9800fbk.execute-api.us-east-1.amazonaws.com/"}]
+servers = [{"url": settings.OPENAQ_FASTAPI_URL}]
 
 
 

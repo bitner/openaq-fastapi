@@ -14,7 +14,8 @@ logger.setLevel(logging.DEBUG)
 router = APIRouter()
 
 
-@router.get("/measurements")
+@router.get("/v1/measurements")
+@router.get("/v2/measurements")
 async def locations_get(
     db: DB = Depends(),
     paging: MeasurementPaging = Depends(),
@@ -51,7 +52,7 @@ async def locations_get(
         WHERE {where_sql}
         """
     summary = await db.fetchrow(summary_q, params)
-    if summary is None:
+    if summary is None or summary[0] is None:
         return {"error": "no sensors found matching search"}
 
     logger.debug('total_count %s, min %s, max %s', summary[0], summary[1], summary[2])

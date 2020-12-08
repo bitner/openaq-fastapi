@@ -16,7 +16,6 @@ logger.setLevel(logging.DEBUG)
 router = APIRouter()
 
 
-@router.get("/averages")
 async def averages_get(
     db: DB = Depends(),
     paging: MeasurementPaging = Depends(),
@@ -283,7 +282,7 @@ async def averages_get(
     logger.debug("Total Time: %s", time.time() - start)
     return {"meta": meta, "results": json_rows}
 
-
+@router.get("/v1/averages")
 @router.get("/v2/averages")
 async def averages_v2_get(
     db: DB = Depends(),

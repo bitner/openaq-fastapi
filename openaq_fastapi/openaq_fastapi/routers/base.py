@@ -13,6 +13,8 @@ from aiocache.plugins import HitMissRatioPlugin, TimingPlugin
 from buildpg import S, V, funcs, logic, render
 from fastapi import Depends, Query, Request
 from pydantic import BaseModel, validator
+from starlette.exceptions import HTTPException
+import asyncpg
 
 import re
 import pytz
@@ -52,7 +54,6 @@ class Order(str, Enum):
 
 
 class Spatial(str, Enum):
-    city = "city"
     country = "country"
     location = "location"
     project = "project"
@@ -82,13 +83,13 @@ class Coordinates(BaseModel):
     @validator("lat")
     def lat_within_range(cls, v):
         if not -90 <= v <= 90:
-            raise ValueError("Latitude outside allowed range")
+            raise HTTPException(status_code=400, detail="Latitude outside allowed range")
         return v
 
     @validator("lon")
     def lon_within_range(cls, v):
         if not -180 <= v <= 180:
-            raise ValueError("Longitude outside allowed range")
+            raise HTTPException(status_code=400, detail="Longitude outside allowed range")
         return v
 
 
@@ -96,7 +97,7 @@ class Paging:
     def __init__(
         self,
         limit: Optional[int] = Query(100, gt=0, le=10000),
-        page: Optional[int] = Query(1, gt=0),
+        page: Optional[int] = Query(1, gt=0, le=10),
         sort: Optional[Sort] = Query("desc"),
         order_by: Optional[Order] = Query("lastUpdated"),
     ):
@@ -186,7 +187,7 @@ class MeasurementPaging:
     def __init__(
         self,
         limit: Optional[int] = Query(100, gt=0, le=10000),
-        page: Optional[int] = Query(1, gt=0),
+        page: Optional[int] = Query(1, gt=0, le=10),
         sort: Optional[Sort] = Query("desc"),
         order_by: Optional[Order] = Query("datetime"),
         date_from: Union[datetime, date, None] = None,
@@ -286,6 +287,7 @@ class Filters:
             ),
         ),
         city: Optional[List[str]] = Query(None,),
+        unit: Optional[List[str]] = Query(None, aliases='units',),
         measurand: Optional[List[Measurand]] = Query(
             None,
             aliases=(
@@ -319,6 +321,7 @@ class Filters:
         self.include_fields = include_fields
         self.project = project
         self.source_name = project
+        self.units = unit
 
     def get_measurement_q(self):
         if self.measurand:
@@ -475,7 +478,14 @@ class DB:
         start = time.time()
         logger.debug("Start time: %s Query: %s Args:%s", start, query, kwargs)
         rquery, args = render(query, **kwargs)
-        r = await self.pool.fetch(rquery, *args)
+        try:
+            r = await self.pool.fetch(rquery, *args)
+        except asyncpg.exceptions.UndefinedColumnError as e:
+            raise HTTPException(status_code=400, detail=f"{e}")
+        except asyncpg.exceptions.DataError as e:
+            raise HTTPException(status_code=400, detail=f"{e}")
+        except asyncpg.exceptions.CharacterNotInRepertoireError as e:
+            raise HTTPException(status_code=400, detail=f"{e}")
         logger.debug(
             "query: %s, args: %s, took: %s", rquery, args, time.time() - start
         )
@@ -486,7 +496,14 @@ class DB:
         start = time.time()
         logger.debug("Start time: %s", start)
         rquery, args = render(query, **kwargs)
-        r = await self.pool.fetchrow(rquery, *args)
+        try:
+            r = await self.pool.fetchrow(rquery, *args)
+        except asyncpg.exceptions.UndefinedColumnError as e:
+            raise HTTPException(status_code=400, detail=f"{e}")
+        except asyncpg.exceptions.DataError as e:
+            raise HTTPException(status_code=400, detail=f"{e}")
+        except asyncpg.exceptions.CharacterNotInRepertoireError as e:
+            raise HTTPException(status_code=400, detail=f"{e}")
         logger.debug(
             "query: %s, args: %s, took: %s", rquery, args, time.time() - start
         )
@@ -497,7 +514,14 @@ class DB:
         start = time.time()
         logger.debug("Start time: %s", start)
         rquery, args = render(query, **kwargs)
-        r = await self.pool.fetchval(rquery, *args)
+        try:
+            r = await self.pool.fetchval(rquery, *args)
+        except asyncpg.exceptions.UndefinedColumnError as e:
+            raise HTTPException(status_code=400, detail=f"{e}")
+        except asyncpg.exceptions.DataError as e:
+            raise HTTPException(status_code=400, detail=f"{e}")
+        except asyncpg.exceptions.CharacterNotInRepertoireError as e:
+            raise HTTPException(status_code=400, detail=f"{e}")
         logger.debug(
             "query: %s, args: %s, took: %s", rquery, args, time.time() - start
         )

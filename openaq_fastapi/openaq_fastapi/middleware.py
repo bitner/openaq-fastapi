@@ -60,13 +60,13 @@ class StripParametersMiddleware(BaseHTTPMiddleware):
 
         # logger.debug(params)
         newscope = request.scope
-        logger.debug(f"NEW BEFORE: {newscope}")
+        # logger.debug(f"NEW BEFORE: {newscope}")
         qs = newscope['query_string'].decode('utf-8')
         newqs = re.sub(r'\[\d*\]', '', qs).encode('utf-8')
         newscope['query_string'] = newqs
-        logger.debug(f'NEW AFTER: {newscope}')
+        # logger.debug(f'NEW AFTER: {newscope}')
         new_request = Request(scope=newscope)
-        logger.debug(f"{new_request.scope}")
+        # logger.debug(f"{new_request.scope}")
 
 
 

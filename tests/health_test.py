@@ -1,21 +1,22 @@
 import requests
-import csv
 import pytest
+import os
+import schemathesis
 
+
+BASEURL=os.getenv('OPENAQ_FASTAPI_URL')
+
+schema = schemathesis.from_uri(f"{BASEURL}/openapi.json")
 
 @pytest.fixture
 def url_list():
     """
     List of preivously broken URLs to check to insure no regressions
     """
-    with open("tests/url_list.csv") as csv_file:
-        csv_reader = csv.reader(csv_file, delimiter=",")
-        all_urls = []
-        for row in csv_reader:
-            all_urls.extend(row)
-        # Remove empty strings from hanging commas
-        all_urls = list(filter(None, all_urls))
-        return all_urls
+
+    with open("./url_list.txt") as file:
+        urls = [BASEURL + line.rstrip() for line in file]
+    return urls
 
 
 @pytest.fixture
@@ -32,6 +33,12 @@ def test_ok_status(url_list, max_wait):
     Assert 2 - Confirm that frequently used URLs respond within our desired time window
     """
     for url in url_list:
+        print(url)
         r = requests.get(url)
         assert r.status_code == requests.codes.ok
         assert r.elapsed.total_seconds() < max_wait
+
+
+@schema.parametrize()
+def test_api(case):
+    case.call_and_validate()

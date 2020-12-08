@@ -77,7 +77,7 @@ class Nodes:
         return {"meta": meta, "results": json_rows}
 
 
-@router.get("/nodes")
+# @router.get("/nodes")
 async def get_data(nodes: Nodes = Depends()):
     data = await nodes.fetch_data()
     return data
@@ -121,7 +121,7 @@ locations_jq = jq.compile(
 )
 
 
-@router.get("/locations")
+# @router.get("/locations")
 async def get_data(nodes: Nodes = Depends()):
     data = await nodes.fetch_data()
     return locations_jq.input(data).first()
@@ -153,7 +153,7 @@ latest_jq = jq.compile(
 )
 
 
-@router.get("/latest")
+# @router.get("/latest")
 async def get_data(nodes: Nodes = Depends()):
     data = await nodes.fetch_data()
     ret = latest_jq.input(data).first()
