@@ -2,11 +2,14 @@ import requests
 import pytest
 import os
 import schemathesis
+from hypothesis import settings
 
 
 BASEURL=os.getenv('OPENAQ_FASTAPI_URL')
 
+schemathesis.fixups.install()
 schema = schemathesis.from_uri(f"{BASEURL}/openapi.json")
+
 
 @pytest.fixture
 def url_list():
@@ -40,5 +43,6 @@ def test_ok_status(url_list, max_wait):
 
 
 @schema.parametrize()
+@settings(max_examples=100, deadline=15000)
 def test_api(case):
     case.call_and_validate()
