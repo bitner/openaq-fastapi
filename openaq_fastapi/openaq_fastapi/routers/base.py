@@ -4,7 +4,7 @@ import re
 import time
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from enum import Enum
+from enum import Enum, auto
 from math import ceil
 from types import FunctionType
 from typing import Dict, List, Optional, Union
@@ -19,8 +19,16 @@ from buildpg import S, V, funcs, logic, render
 from dateutil.parser import parse
 from dateutil.tz import UTC
 from fastapi import Depends, HTTPException, Path, Query, Request
-from pydantic import (BaseModel, Field, Json, ValidationError, confloat,
-                      conint, constr, validator)
+from pydantic import (
+    BaseModel,
+    Field,
+    Json,
+    ValidationError,
+    confloat,
+    conint,
+    constr,
+    validator,
+)
 from pydantic.dataclasses import dataclass
 from pydantic.error_wrappers import ValidationError
 from pydantic.typing import Any, Literal
@@ -37,7 +45,7 @@ maxint = 2147483647
 
 
 def parameter_dependency_from_model(name: str, model_cls):
-    '''
+    """
     Takes a pydantic model class as input and creates a dependency with corresponding
     Query parameter definitions that can be used for GET
     requests.
@@ -48,20 +56,25 @@ def parameter_dependency_from_model(name: str, model_cls):
     Arguments:
         name: Name for the dependency function.
         model_cls: A ``BaseModel`` inheriting model class as input.
-    '''
+    """
     names = []
     annotations: Dict[str, type] = {}
     defaults = []
     for field_model in model_cls.__fields__.values():
-        logger.debug(f"{field_model.name} {field_model.field_info} {field_model.outer_type_}")
-        if field_model.name not in ['self']:
+        logger.debug(
+            f"{field_model.name} {field_model.field_info} {field_model.outer_type_}"
+        )
+        if field_model.name not in ["self"]:
             field_info = field_model.field_info
 
             names.append(field_model.name)
             annotations[field_model.name] = field_model.outer_type_
-            defaults.append(Query(field_model.default, description=field_info.description))
+            defaults.append(
+                Query(field_model.default, description=field_info.description)
+            )
 
-    code = inspect.cleandoc('''
+    code = inspect.cleandoc(
+        """
     def %s(%s):
         try:
             return %s(%s)
@@ -71,11 +84,16 @@ def parameter_dependency_from_model(name: str, model_cls):
                 error['loc'] = ['query'] + list(error['loc'])
             raise HTTPException(422, detail=errors)
 
-    ''' % (
-        name, ', '.join(names), model_cls.__name__,
-        ', '.join(['%s=%s' % (name, name) for name in names])))
+    """
+        % (
+            name,
+            ", ".join(names),
+            model_cls.__name__,
+            ", ".join(["%s=%s" % (name, name) for name in names]),
+        )
+    )
 
-    compiled = compile(code, 'string', 'exec')
+    compiled = compile(code, "string", "exec")
     env = {model_cls.__name__: model_cls}
     env.update(**globals())
     func = FunctionType(compiled.co_consts[0], env, name)
@@ -83,6 +101,7 @@ def parameter_dependency_from_model(name: str, model_cls):
     func.__defaults__ = (*defaults,)
 
     return func
+
 
 def invalid(loc, msg):
     detail = [{"loc": ["path", loc], "msg": msg, "type": "Validation Error"}]
@@ -92,14 +111,15 @@ def invalid(loc, msg):
 
 class OBaseModel(BaseModel):
     class Config:
-        min_anystr_length=1
-        validate_assignment=True
-        allow_population_by_field_name=True
+        min_anystr_length = 1
+        validate_assignment = True
+        allow_population_by_field_name = True
         alias_generator = humps.decamelize
 
-
-
-
+    @classmethod
+    def depends(cls):
+        logger.debug(f"Depends {cls}")
+        return parameter_dependency_from_model("depends", cls)
 
 
 class Meta(BaseModel):
@@ -112,49 +132,12 @@ class Meta(BaseModel):
 
 
 class OpenAQResult(BaseModel):
-    meta: Meta
+    meta: Meta = Meta()
     results: Optional[List[Any]] = []
 
 
-
-
-
-@dataclass
-class BaseWhere:
-    def where(self):
-        name = humps.decamelize(type(self).__name__)
-        if getattr(self, name) is not None:
-            return f" AND {name} = ANY(:{name}) "
-        return ""
-
-
-@dataclass
-class BaseListStr(BaseWhere):
-    @validator("*", each_item=True)
-    def check_nonempty(cls, v):
-        name = humps.decamelize(type(cls).__name__)
-        if not v:
-            invalid(name, "cannot be empty")
-        return str.strip(v)
-
-
-@dataclass
-class BaseListInt(BaseWhere):
-    @validator("*", each_item=True)
-    def check_nonempty(cls, v):
-        name = humps.decamelize(type(cls).__name__)
-        logger.debug(f"baselistint {cls, v}")
-        if v is not None:
-            if v > maxint:
-                invalid(name, f"cannot be > {maxint}")
-            if v < 0:
-                invalid(name, f"cannot be < 0")
-        return v
-
 class City(OBaseModel):
     city: Optional[List[str]] = Query(None)
-
-
 
 
 class Country(OBaseModel):
@@ -167,13 +150,11 @@ class Country(OBaseModel):
         return None
 
 
-@dataclass
-class SourceName(BaseListStr):
+class SourceName(OBaseModel):
     source_name: Optional[List[str]] = Query(None, aliases=("source", "sourceName"))
 
 
-@dataclass
-class Project(BaseListInt):
+class Project(OBaseModel):
     project_id: Optional[int] = None
     project: Optional[List[int]] = Query(None, gt=0, le=maxint)
 
@@ -192,17 +173,11 @@ class Project(BaseListInt):
             invalid("project", f"project must be an int between 0 and {maxint}")
         return project
 
-    def where(self):
-        logger.debug(f"{asdict(self)}")
-        if self.project and len(self.project) > 0:
-            return " AND groups_id = ANY(:project) "
-        return ""
 
 
-@dataclass
-class Location:
+class Location(OBaseModel):
     location_id: Optional[int] = None
-    location: Optional[List[Union[int, str]]] = Query(None)
+    location: Optional[List[Union[int, str]]] = None
 
     @validator("location")
     def validate_location(cls, v, values):
@@ -221,19 +196,10 @@ class Location:
         logger.debug(f"returning {ret}")
         return ret
 
-    def where(self):
-        logger.debug(f"{asdict(self)}")
-        if isinstance(self.location, list) and all(
-            isinstance(x, int) for x in self.location
-        ):
-            return " AND id = ANY(:location) "
-        elif isinstance(self.location, list):
-            return " AND name = ANY(:location) "
-        return ""
 
-@dataclass
-class HasGeo:
-    has_geo: bool = Query(None)
+
+class HasGeo(OBaseModel):
+    has_geo: bool = None
 
     def where(self):
         if self.has_geo is not None:
@@ -243,73 +209,72 @@ class HasGeo:
                 return " AND geog is null "
         return ""
 
-@dataclass
-class Geo:
-    coordinates: Optional[str] = Query(
+
+class Geo(OBaseModel):
+    coordinates: Optional[str] = Field(
         None, regex=r"^-?\d{1,2}\.?\d{0,8},-?1?\d{1,2}\.?\d{0,8}$"
     )
     lat: Optional[confloat(ge=-90, le=90)] = None
     lon: Optional[confloat(ge=-180, le=180)] = None
     radius: conint(gt=0, le=100000) = 1000
 
-    @validator('lat')
+    @validator("lat")
     def validate_lat(cls, v, values):
-        coordinates = values.get('coordinates', None)
+        coordinates = values.get("coordinates", None)
         if coordinates is not None:
             try:
-                lat, _ = values.get('coordinates').split(',')
-                lat=float(lat)
+                lat, _ = values.get("coordinates").split(",")
+                lat = float(lat)
                 if lat >= -90 and lat <= 90:
                     return lat
                 else:
-                    invalid('lat','latitude is out of range')
+                    invalid("lat", "latitude is out of range")
             except Exception as e:
-                invalid('lat', f"{e}")
+                invalid("lat", f"{e}")
 
-    @validator('lon')
+    @validator("lon")
     def validate_lon(cls, v, values):
-        coordinates = values.get('coordinates', None)
+        coordinates = values.get("coordinates", None)
         if coordinates is not None:
             try:
-                _, lon = values.get('coordinates').split(',')
-                lon=float(lon)
+                _, lon = values.get("coordinates").split(",")
+                lon = float(lon)
                 if lon >= -180 and lon <= 180:
                     return lon
                 else:
-                    invalid('lon','longitude is out of range')
+                    invalid("lon", "longitude is out of range")
             except Exception as e:
-                invalid('lon', f"{e}")
+                invalid("lon", f"{e}")
 
     def where(self):
         if self.lat is not None and self.lon is not None:
-            return " AND st_dwithin(st_makepoint(:lon, :lat)::geography, geog, :radius) "
+            return (
+                " AND st_dwithin(st_makepoint(:lon, :lat)::geography, geog, :radius) "
+            )
         return ""
 
 
-@dataclass
-class Measurands:
-    measurands: Optional[List[str]] = Query(None, aliases=('parameter','parameters',))
+class Measurands(OBaseModel):
+    parameter: Optional[List[str]] = None
+    measurand: Optional[List[str]] = None
+    units: Optional[List[str]] = None
 
-    def where(self):
-        v = self.measurands
-        if v is not None:
-           return f" AND parameters @> ANY(jsonb_array(:measurands_param::jsonb)) "
-        return ""
+    @validator('measurand', check_fields=False)
+    def check_measurand(cls, v, values):
+        if v is None:
+            return values.get('parameter')
+        return v
 
-    def param(self):
-        v = self.measurands
-        if v is not None:
-            return orjson.dumps(
-                [[
-                    {"measurand": m}
-                    for m in v
-                ]]
-            ).decode()
+    @validator('parameter', check_fields=False)
+    def check_parameter(cls, v, values):
+        if v is None:
+            return values.get('measurand')
+        return v
 
 
 
 
-class Paging(BaseModel):
+class Paging(OBaseModel):
     limit: int = Query(100, gt=0, le=10000)
     page: int = Query(1, gt=0, le=1000)
     offset: int = Query(0, ge=0, le=10000)
@@ -320,7 +285,6 @@ class Paging(BaseModel):
         if offset + values["limit"] > 10000:
             invalid("limit, offset", "offset + limit must be < 10000")
         return offset
-
 
 
 # class Measurand(str, Enum):
@@ -335,8 +299,6 @@ class Paging(BaseModel):
 class Sort(str, Enum):
     asc = "asc"
     desc = "desc"
-    ASC = "ASC"
-    DESC = "DESC"
 
 
 # class Order(str, Enum):
@@ -353,19 +315,20 @@ class Sort(str, Enum):
 #     measurements = "measurements"
 
 
-# class Spatial(str, Enum):
-#     country = "country"
-#     location = "location"
-#     project = "project"
+class Spatial(str, Enum):
+    country = "country"
+    location = "location"
+    project = "project"
 
 
-# class Temporal(str, Enum):
-#     day = "day"
-#     month = "month"
-#     year = "year"
-#     moy = "moy"
-#     dow = "dow"
-#     hour = "hour"
+class Temporal(str, Enum):
+    day = "day"
+    month = "month"
+    year = "year"
+    moy = "moy"
+    dow = "dow"
+    hour = "hour"
+    total = "total"
 
 
 # class IncludeFields(str, Enum):
@@ -373,16 +336,19 @@ class Sort(str, Enum):
 #     averagingPeriod = "averagingPeriod"
 #     sourceName = "sourceName"
 
+
 class APIBase(Paging):
     sort: Optional[Sort] = Query("asc")
 
     def where(self):
-        wheres=[]
+        wheres = []
         for f, v in self:
             logger.debug(f"APIBase {f} {v}")
             if isinstance(v, List):
                 wheres.append(f"{f} = ANY(:{f})")
-        return (' AND ').join(wheres)
+        if len(wheres) > 0:
+            return (" AND ").join(wheres)
+        return " TRUE "
 
 
 # class OldPaging:
@@ -472,6 +438,17 @@ def fix_datetime(
             microseconds=d.microsecond,
         )
     return d
+
+
+class DateRange(OBaseModel):
+    date_from: Union[datetime, date, None] = None
+    date_to: Union[datetime, date, None] = None
+    date_from_adj: Union[datetime, date, None] = None
+    date_to_adj: Union[datetime, date, None] = None
+
+    @validator("date_from", "date_to","date_from_adj", "date_to_adj", check_fields=False)
+    def check_dates(cls, v, values):
+        return fix_datetime(v)
 
 
 # class MeasurementPaging:

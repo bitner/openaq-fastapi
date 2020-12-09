@@ -26,6 +26,7 @@ setup(
         'msgpack',
         'asyncpg',
         'uvicorn',
+        'humps',
     ],
     extras_require={
         'dev': [

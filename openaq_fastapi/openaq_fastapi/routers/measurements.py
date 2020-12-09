@@ -1,12 +1,27 @@
 import logging
 import time
-from dateutil.tz import UTC
+from datetime import timedelta
 
 import orjson as json
-from fastapi import APIRouter, Depends
-
-from .base import DB, MeasurementFilters, MeasurementPaging
-from datetime import timedelta
+from dateutil.tz import UTC
+from fastapi import APIRouter, Depends, Query
+from pydantic.typing import Literal
+from .base import (
+    DB,
+    APIBase,
+    City,
+    Country,
+    DateRange,
+    Geo,
+    HasGeo,
+    Location,
+    Measurands,
+    OBaseModel,
+    OpenAQResult,
+    Project,
+    Spatial,
+    Temporal,
+)
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -14,30 +29,42 @@ logger.setLevel(logging.DEBUG)
 router = APIRouter()
 
 
-@router.get("/v1/measurements")
-@router.get("/v2/measurements")
+class Measurements(
+    Location, City, Country, Geo, Measurands, HasGeo, APIBase, DateRange
+):
+    order_by: Literal[
+        "city", "country", "location", "sourceName", "datetime"
+    ] = Query("datetime")
+
+    def where(self):
+        wheres = []
+        for f, v in self:
+            logger.debug(f"{f} {v}")
+            if v is None:
+                logger.debug('value none')
+                continue
+            else:
+                if f == "project":
+                    wheres.append(" groups_id = ANY(:project) ")
+                elif f in ['has_geo','measurand','units','country','city','location']:
+                    logger.debug('setting q')
+                    wheres.append(f"{f} = ANY(:{f})")
+        if len(wheres) > 0:
+            return (" AND ").join(wheres)
+        return " TRUE "
+
+
+@router.get("/v1/measurements", response_model=OpenAQResult)
+@router.get("/v2/measurements", response_model=OpenAQResult)
 async def locations_get(
     db: DB = Depends(),
-    paging: MeasurementPaging = Depends(),
-    filters: MeasurementFilters = Depends(),
+    m: Measurements = Depends(Measurements.depends()),
 ):
-    start = time.time()
-    paging_q = await paging.sql()
-    where_q = await filters.sql()
-    date_from = paging.date_from
-    date_to = paging.date_to
-    include_fields_q = await filters.measurement_fields()
-    params={}
-    count = None
-    params.update(paging_q["params"])
-    params.update(where_q["params"])
-
-    where_sql = where_q["q"]
-    paging_sql = paging_q["q"]
-
+    date_from = m.date_from
+    date_to = m.date_to
 
     # get overall summary numbers
-    summary_q = f"""
+    q = f"""
         SELECT
             sum(value_count) as count,
             min(first_datetime) as first,
@@ -49,51 +76,56 @@ async def locations_get(
         LEFT JOIN sensor_nodes USING (sensor_nodes_id)
         LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
         LEFT JOIN measurands USING (measurands_id)
-        WHERE {where_sql}
+        WHERE {m.where()}
         """
-    summary = await db.fetchrow(summary_q, params)
-    if summary is None or summary[0] is None:
-        return {"error": "no sensors found matching search"}
+    rows = await db.fetch(q, m.dict())
+    logger.debug(f"{rows}")
+    if rows is None:
+        return OpenAQResult()
+    try:
+        total_count = rows[0][0]
+        range_start = rows[0][1].replace(tzinfo=UTC)
+        range_end = rows[0][2].replace(tzinfo=UTC)
+    except:
+        return OpenAQResult()
 
-    logger.debug('total_count %s, min %s, max %s', summary[0], summary[1], summary[2])
-    total_count = summary[0]
-    range_start = summary[1].replace(tzinfo=UTC)
-    range_end = summary[2].replace(tzinfo=UTC)
+    if m.date_from is None:
+        m.date_from = range_start
+    else:
+        m.date_from = max(date_from, range_start)
 
+    if m.date_to is None:
+        m.date_to = range_end
+    else:
+        m.date_to = min(date_to, range_end)
+
+    count=None
     # if time is unbounded, we can just use the total count
-    if (date_from is None or date_from == range_start) and (date_to is None or date_to == range_end):
+    if (m.date_from == range_start) and (m.date_to == range_end):
         count = total_count
 
     # snap date_from and date_to to the data range
-    if date_from is None:
-        date_from = date_from_adj = range_start
+    if m.date_from is None:
+        m.date_from = m.date_from_adj = range_start
     else:
-        date_from = date_from_adj = max(date_from, range_start)
+        m.date_from = m.date_from_adj = max(m.date_from, range_start)
 
-    if date_to is None:
-        date_to = date_to_adj = range_end
+    if m.date_to is None:
+        m.date_to = m.date_to_adj = range_end
     else:
-        date_to = date_to_adj = min(date_to, range_end)
+        m.date_to = m.date_to_adj = min(m.date_to, range_end)
 
     # estimate time it would take to fulfill page requirements
     # buffer by a factor of 10 for variability
-    delta = (range_end-range_start)/int(total_count) * int(paging.totalrows) * 10
+    delta = (range_end - range_start) / int(total_count) * 100000
 
     # if we are ordering by time, keep us from searching everything
     # for paging
-    if paging.order_by == 'datetime':
-        if paging.sort == 'asc':
-            date_to_adj = date_from_adj + delta
+    if m.order_by == "datetime":
+        if m.sort == "asc":
+            m.date_to_adj = m.date_from_adj + delta
         else:
-            date_from_adj  = date_to_adj - delta
-
-    params.update( {
-        "date_to": date_to,
-        "date_from": date_from,
-        "date_to_adj": date_to_adj,
-        "date_from_adj": date_from_adj
-    })
-
+            m.date_from_adj = m.date_to_adj - delta
 
     # get estimated count
     if count is None:
@@ -105,12 +137,12 @@ async def locations_get(
                 AND
                 datetime <= :date_to::timestamptz
                 AND
-                {where_sql}
+                {m.where()}
             ;
             """
 
-        estimate_j = await db.fetchval(estimated_count_q, params)
-        count = json.loads(estimate_j)[0]['Plan']['Plan Rows']
+        estimate_j = await db.fetchval(estimated_count_q, m.dict())
+        count = json.loads(estimate_j)[0]["Plan"]["Plan Rows"]
         logger.debug(f"Estimate: {count}")
 
     # # get estimated count for adjusted date to see if we need to widen the window
@@ -138,8 +170,6 @@ async def locations_get(
     #     limcount = json.loads(estimate_j)[0]['Plan']['Plan Rows']
     #     logger.debug(f"Estimate: {limcount}")
     #     tries += 1
-
-
 
     # monthly_count_q = f"""
     #     SELECT
@@ -196,13 +226,15 @@ async def locations_get(
                 units as unit,
                 country,
                 city
-                {include_fields_q}
+
             FROM measurements_web
-            WHERE {where_sql}
+            WHERE {m.where()}
             AND datetime
             BETWEEN :date_from_adj::timestamptz
             AND :date_to_adj::timestamptz
-            {paging_sql}
+            ORDER BY "{m.order_by}" {m.sort}
+            OFFSET :offset
+            LIMIT :limit
             ), t1 AS (
                 SELECT
                     location,
@@ -218,26 +250,11 @@ async def locations_get(
                         ) as coordinates,
                     country,
                     city
-                    {include_fields_q}
                 FROM t
             )
-            SELECT row_to_json(t1) as json FROM t1;
+            SELECT {count}::int as count, row_to_json(t1) as json FROM t1;
         """
 
-        rows = await db.fetch(q, params)
-        logger.debug("Time to before rows loaded: %s", time.time() - start)
-        json_rows = [json.loads(r["json"]) for r in rows]
-    else:
-        json_rows = []
+    output = await db.fetchOpenAQResult(q, m.dict())
 
-    meta = {
-        "name": "openaq-api",
-        "license": "CC BY 4.0",
-        "website": "https://docs.openaq.org/",
-        "page": paging.page,
-        "limit": paging.limit,
-        "found": count,
-    }
-
-    logger.debug("Total Time: %s", time.time() - start)
-    return {"meta": meta, "results": json_rows}
+    return output
