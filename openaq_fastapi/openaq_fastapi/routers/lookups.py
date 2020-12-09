@@ -1,13 +1,19 @@
 import logging
 import time
-from typing import Optional
-
-import orjson as json
-from fastapi import APIRouter, Depends, Query, Path
-
-from .base import DB, Filters, Paging, Spatial, Temporal, Sort
+from dataclasses import asdict
 from enum import Enum
 from typing import List, Optional
+
+import orjson as json
+from asyncpg.exceptions import FunctionExecutedNoReturnStatementError
+from fastapi import APIRouter, Depends, Path, Query
+from pydantic.json import pydantic_encoder
+from pydantic.typing import Literal
+from pydantic.dataclasses import dataclass
+
+from .base import (DB, City, Country, Location, Meta, OpenAQResult,
+                   Paging, Project, Sort, SourceName, parameter_dependency_from_model,
+                   maxint, HasGeo, Geo, Measurands, APIBase)
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -15,39 +21,17 @@ logger.setLevel(logging.DEBUG)
 router = APIRouter()
 
 
-class CitiesOrder(str, Enum):
-    city="city"
-    country="country"
-    count="count"
-    locations="locations"
-    firstUpdated= "firstUpdated"
-    lastUpdated = "lastUpdated"
+class Cities(City, Country, APIBase):
+    order_by: Literal["city", "country", "firstUpdated", "lastUpdated"] = Query("city")
 
-@router.get("/v1/cities")
-@router.get("/v2/cities")
+cities_depends = parameter_dependency_from_model('depends', Cities)
+
+@router.get("/v1/cities", response_model=OpenAQResult)
+@router.get("/v2/cities", response_model=OpenAQResult)
 async def cities_get(
     db: DB = Depends(),
-    city: Optional[List[str]] = Query(None,),
-    country:Optional[List[str]] = Query(None, max_length=2),
-    order_by: Optional[CitiesOrder] = Query("city"),
-    sort: Optional[Sort] = Query("asc"),
-    limit: Optional[int] = Query(100, gt=0, le=10000),
-    page: Optional[int] = Query(1, gt=0, le=10),
+    cities: Cities = Depends(cities_depends)
 ):
-    offset = (page - 1) * limit
-    where_sql = " TRUE "
-    if city is not None:
-        where_sql += " AND city = ANY(:city) "
-    if country is not None:
-        where_sql += " And country = ANY(:country) "
-
-    params={
-        "city": city,
-        "country": country,
-        "limit": limit,
-        "offset": offset,
-    }
-
     q = f"""
     WITH t AS (
     SELECT
@@ -66,11 +50,11 @@ async def cities_get(
     LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
     LEFT JOIN measurands USING (measurands_id)
     WHERE
-    {where_sql}
+    {cities.where()}
     GROUP BY
     country,
     city
-    ORDER BY "{order_by}" {sort}
+    ORDER BY "{cities.order_by}" {cities.sort}
     OFFSET :offset
     LIMIT :limit
     )
@@ -78,50 +62,22 @@ async def cities_get(
 
     """
 
-    meta = {
-        "name": "openaq-api",
-        "license": "CC BY 4.0",
-        "website": "https://docs.openaq.org/",
-        "page": page,
-        "limit": limit,
-        "found": None,
-    }
-    rows = await db.fetch(q, params)
-    if len(rows) == 0:
-        meta["found"] = 0
-        return {"meta": meta, "results": []}
-    meta["found"] = rows[0]["count"]
-    json_rows = [json.loads(r[1]) for r in rows]
+    output = await db.fetchOpenAQResult(q, cities.dict())
 
-    return {"meta": meta, "results": json_rows}
-
-class CountriesOrder(str, Enum):
-    country="country"
-    firstUpdated= "firstUpdated"
-    lastUpdated = "lastUpdated"
+    return output
 
 
-@router.get("/v1/countries")
-@router.get("/v2/countries")
+class Countries(Country, APIBase):
+    order_by: Literal["country", "firstUpdated", "lastUpdated"] = Query("country")
+
+countries_depends = parameter_dependency_from_model('depends', Countries)
+
+@router.get("/v1/countries", response_model=OpenAQResult)
+@router.get("/v2/countries", response_model=OpenAQResult)
 async def countries_get(
     db: DB = Depends(),
-    country:Optional[List[str]] = Query(None, max_length=2),
-    order_by: Optional[CountriesOrder] = Query("country"),
-    sort: Optional[Sort] = Query("asc"),
-    limit: Optional[int] = Query(100, gt=0, le=10000),
-    page: Optional[int] = Query(1, gt=0, le=10),
+    countries: Countries = Depends(countries_depends),
 ):
-    offset = (page - 1) * limit
-    where_sql = " TRUE "
-
-    if country is not None:
-        where_sql += " And country = ANY(:country) "
-
-    params={
-        "country": country,
-        "limit": limit,
-        "offset": offset,
-    }
 
     q = f"""
     WITH t AS (
@@ -142,10 +98,10 @@ async def countries_get(
     LEFT JOIN measurands USING (measurands_id)
     LEFT JOIN countries ON (country=iso_a2)
     WHERE
-    {where_sql}
+    {countries.where()}
     GROUP BY
     1,2
-    ORDER BY "{order_by}" {sort}
+    ORDER BY "{countries.order_by}" {countries.sort}
     OFFSET :offset
     LIMIT :limit
     )
@@ -153,55 +109,22 @@ async def countries_get(
 
     """
 
-    meta = {
-        "name": "openaq-api",
-        "license": "CC BY 4.0",
-        "website": "https://docs.openaq.org/",
-        "page": page,
-        "limit": limit,
-        "found": None,
-    }
-    rows = await db.fetch(q, params)
-    if len(rows) == 0:
-        meta["found"] = 0
-        return {"meta": meta, "results": []}
-    meta["found"] = rows[0]["count"]
-    json_rows = [json.loads(r[1]) for r in rows]
+    output = await db.fetchOpenAQResult(q, countries.dict())
 
-    return {"meta": meta, "results": json_rows}
+    return output
 
+class Sources(SourceName, APIBase):
+    order_by: Literal["sourceName", "firstUpdated", "lastUpdated"] = Query(
+        "sourceName"
+    )
 
-
-class SourcesOrder(str, Enum):
-    sourceName="sourceName"
-    firstUpdated="firstUpdated"
-    lastUpdated="lastUpdated"
-
-@router.get("/v1/sources")
-@router.get("/v2/sources")
+sources_depends = parameter_dependency_from_model('depends', Sources)
+@router.get("/v1/sources", response_model=OpenAQResult)
+@router.get("/v2/sources", response_model=OpenAQResult)
 async def sources_get(
     db: DB = Depends(),
-    source_name:Optional[List[str]] = Query(
-        None,
-        aliases=('source', 'sourceName'),
-        min_length=3
-    ),
-    order_by: Optional[SourcesOrder] = Query("sourceName"),
-    sort: Optional[Sort] = Query("asc"),
-    limit: Optional[int] = Query(100, gt=0, le=10000),
-    page: Optional[int] = Query(1, gt=0, le=10),
+    sources: Sources = Depends(),
 ):
-    offset = (page - 1) * limit
-    where_sql = " TRUE "
-
-    if source_name is not None:
-        where_sql += " AND source_name = ANY(:source_name) "
-
-    params={
-        "source_name": source_name,
-        "limit": limit,
-        "offset": offset,
-    }
 
     q = f"""
     WITH t AS (
@@ -222,10 +145,10 @@ async def sources_get(
     LEFT JOIN sensors_first_last USING (sensors_id)
     LEFT JOIN measurands USING (measurands_id)
     WHERE
-    {where_sql}
+    {sources.where()}
     GROUP BY
     1,2
-    ORDER BY "{order_by}" {sort}
+    ORDER BY "{sources.order_by}" {sources.sort}
     OFFSET :offset
     LIMIT :limit
     )
@@ -240,47 +163,23 @@ async def sources_get(
 
     """
 
-    meta = {
-        "name": "openaq-api",
-        "license": "CC BY 4.0",
-        "website": "https://docs.openaq.org/",
-        "page": page,
-        "limit": limit,
-        "found": None,
-    }
-    rows = await db.fetch(q, params)
-    if len(rows) == 0:
-        meta["found"] = 0
-        return {"meta": meta, "results": []}
-    meta["found"] = rows[0]["count"]
-    json_rows = [json.loads(r[1]) for r in rows]
+    output = await db.fetchOpenAQResult(q, sources.dict())
 
-    return {"meta": meta, "results": json_rows}
+    return output
 
 
-
-class ParamsOrder(str, Enum):
-    id="id"
-    name="name"
-    preferredUnit= "preferredUnit"
-    description = "description"
+class Parameters(SourceName, APIBase):
+    order_by: Literal["id", "name", "preferredUnit"] = Query("id")
 
 
-@router.get("/v1/parameters")
-@router.get("/v2/parameters")
+parameters_depends = parameter_dependency_from_model('depends', Parameters)
+
+@router.get("/v1/parameters", response_model=OpenAQResult)
+@router.get("/v2/parameters", response_model=OpenAQResult)
 async def parameters_get(
     db: DB = Depends(),
-    order_by: Optional[ParamsOrder] = Query("name"),
-    sort: Optional[Sort] = Query("asc"),
-    limit: Optional[int] = Query(100, gt=0, le=10000),
-    page: Optional[int] = Query(1, gt=0, le=10),
+    parameters: Parameters = Depends(parameters_depends),
 ):
-    offset = (page - 1) * limit
-
-    params={
-        "limit": limit,
-        "offset": offset,
-    }
 
     q = f"""
     WITH t AS (
@@ -290,77 +189,40 @@ async def parameters_get(
         upper(measurand) as description,
         units as "preferredUnit"
     FROM measurands
-    ORDER BY "{order_by}" {sort}
+    ORDER BY "{parameters.order_by}" {parameters.sort}
     )
     SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
     LIMIT :limit
     OFFSET :offset
     """
 
-    meta = {
-        "name": "openaq-api",
-        "license": "CC BY 4.0",
-        "website": "https://docs.openaq.org/",
-        "page": page,
-        "limit": limit,
-        "found": None,
-    }
-    rows = await db.fetch(q, params)
-    if len(rows) == 0:
-        meta["found"] = 0
-        return {"meta": meta, "results": []}
-    meta["found"] = rows[0]["count"]
-    json_rows = [json.loads(r[1]) for r in rows]
+    output = await db.fetchOpenAQResult(q, parameters.dict())
 
-    return {"meta": meta, "results": json_rows}
+    return output
 
-
-class GroupTypes(str, Enum):
-    source = "source"
-
-
-class GroupOrder(str, Enum):
-    id = "id"
-    name = "name"
-    subtitle = "subtitle"
-    firstUpdated= "firstUpdated"
-    lastUpdated = "lastUpdated"
-
-
-@router.get("/v2/projects")
-@router.get("/v2/projects/{project_id}")
+@router.get("/v2/projects/{project_id}", response_model=OpenAQResult)
+@router.get("/v2/projects", response_model=OpenAQResult)
 async def projects_get(
     db: DB = Depends(),
-    project_id: Optional[int] = Path(None, gt=0, le=9999999),
-    project: Optional[List[int]] = Query(
-        None, gt=0, le=9999999
+    project: Project = Depends(),
+    group_type: Literal["source"] = Query("source", aliases=("groupType",)),
+    order_by: Literal["id", "name", "subtitle", "firstUpdated", "lastUpdated"] = Query(
+        "id"
     ),
-    group_type: Optional[GroupTypes] = Query('source', aliases=('groupType',)),
-    order_by: Optional[GroupOrder] = Query("id"),
     sort: Optional[Sort] = Query("asc"),
-    limit: Optional[int] = Query(100, gt=0, le=10000),
-    page: Optional[int] = Query(1, gt=0, le=10),
+    paging: Paging = Depends(),
 ):
-    offset = (page - 1) * limit
-    if project is None:
-        project = project_id
 
-    where_sql = " type=:group_type AND rollup='total' "
-
-    if project_id is not None:
-        project = [project_id]
-
-    if project is not None:
-        where_sql += " AND groups_id = ANY(:project) "
-
-
-    params={
+    params = {
+        "project": project.project,
         "group_type": group_type,
-        "limit": limit,
-        "offset": offset,
-        "project": project,
+        "limit": paging.limit,
+        "offset": paging.offset,
+        "page": paging.page,
     }
 
+    where_sql = " type=:group_type AND rollup='total' "
+    where_sql += project.where()
 
     q = f"""
         WITH t AS (
@@ -394,52 +256,55 @@ async def projects_get(
 
         )
         SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
+        LIMIT :limit
+        OFFSET :offset
     """
 
-    meta = {
-        "name": "openaq-api",
-        "license": "CC BY 4.0",
-        "website": "https://docs.openaq.org/",
-        "page": page,
-        "limit": limit,
-        "found": None,
-    }
-    rows = await db.fetch(q, params)
-    if len(rows) == 0:
-        meta["found"] = 0
-        return {"meta": meta, "results": []}
-    meta["found"] = rows[0]["count"]
-    json_rows = [json.loads(r[1]) for r in rows]
+    output = await db.fetchOpenAQResult(q, params)
 
-    return {"meta": meta, "results": json_rows}
+    return output
 
 
-
-
-@router.get("/v1/locations/{location_id}")
-@router.get("/v2/locations/{location_id}")
-@router.get("/v1/locations")
-@router.get("/v2/locations")
+@router.get("/v1/locations/{location_id}", response_model=OpenAQResult)
+@router.get("/v2/locations/{location_id}", response_model=OpenAQResult)
+@router.get("/v1/locations", response_model=OpenAQResult)
+@router.get("/v2/locations", response_model=OpenAQResult)
 async def locations_get(
     db: DB = Depends(),
-    paging: Paging = Depends(Paging),
-    filters: Filters = Depends(Filters),
-    location_id: Optional[int] = Path(None, gt=0, le=9999999)
+    city: City = Depends(),
+    country: Country=Depends(),
+    location: Location=Depends(),
+    geo: Geo=Depends(),
+    measurands: Measurands=Depends(),
+    has_geo: HasGeo=Depends(),
+    order_by: Literal[
+        "city", "country", "location", "sourceName", "firstUpdated", "lastUpdated"
+        ] = Query(
+        "id"
+    ),
+    sort: Optional[Sort] = Query("asc"),
+    paging: Paging = Depends(),
 ):
-    logger.debug(f"{paging} {filters}")
-    paging_q = await paging.sql_loc()
-    where_q = await filters.sql()
-    params = {
-        'sensor_nodes_id': location_id
-    }
-    location_sql = ''
-    if location_id is not None:
-        location_sql = ' AND id=:sensor_nodes_id '
-    params.update(paging_q["params"])
-    params.update(where_q["params"])
+    where_sql = ' TRUE '
+    where_sql += location.where()
+    where_sql += country.where()
+    where_sql += city.where()
+    where_sql += has_geo.where()
+    where_sql += geo.where()
+    where_sql += measurands.where()
 
-    where_sql = where_q["q"]
-    paging_sql = paging_q["q"]
+    params = {
+        "city": city.city,
+        "country": country.country,
+        "location": location.location,
+        "limit": paging.limit,
+        "offset": paging.offset,
+        "page": paging.page,
+        "lat": geo.lat,
+        "lon": geo.lon,
+        "radius": geo.radius,
+        "measurands_param": measurands.param(),
+    }
 
     q = f"""
         WITH t1 AS (
@@ -447,36 +312,24 @@ async def locations_get(
             FROM locations_base_v2
             WHERE
             {where_sql}
-            {location_sql}
-            {paging_sql}
+            ORDER BY "{order_by}" {sort}
         ),
         nodes AS (
             SELECT count(distinct id) as nodes
             FROM locations_base_v2
             WHERE
             {where_sql}
-            {location_sql}
         ),
         t2 AS (
-        SELECT to_jsonb(t1) - '{{json,source_name}}'::text[] as json
+        SELECT to_jsonb(t1) - '{{json,source_name,geog}}'::text[] as json
         FROM t1 group by t1, json
         )
-        SELECT t2.*, nodes as count FROM t2, nodes
-
+        SELECT nodes as count, json FROM t2, nodes
+        LIMIT :limit
+        OFFSET :offset
         ;
         """
 
-    meta = {
-        "name": "openaq-api",
-        "license": "CC BY 4.0",
-        "website": "https://docs.openaq.org/",
-        "found": 0
-    }
-    rows = await db.fetch(q, params)
-    if len(rows) == 0:
-        meta["found"] = 0
-        return {"meta": meta, "results": []}
-    meta["found"] = rows[0]["count"]
-    json_rows = [json.loads(r['json']) for r in rows]
+    output = await db.fetchOpenAQResult(q, params)
 
-    return {"meta": meta, "results": json_rows}
+    return output
