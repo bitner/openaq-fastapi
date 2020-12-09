@@ -43,6 +43,6 @@ def test_ok_status(url_list, max_wait):
 
 
 @schema.parametrize()
-@settings(max_examples=100, deadline=15000)
+@settings(max_examples=50, deadline=15000)
 def test_api(case):
     case.call_and_validate()
