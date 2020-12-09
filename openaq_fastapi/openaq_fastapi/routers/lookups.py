@@ -295,6 +295,7 @@ async def projects_get(
         LEFT JOIN measurands USING (measurands_id)
         LEFT JOIN sources USING(source_name)
         WHERE
+        n.metadata->>'origin'='AQDC' AND
         {where_sql}
         GROUP BY
         source_name,
