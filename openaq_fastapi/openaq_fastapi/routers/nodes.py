@@ -1,12 +1,10 @@
 import logging
 import time
-from typing import List, Optional
 
 import jq
 import orjson as json
 from aiocache import cached
-from buildpg import render
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends
 
 from .base import DB, Filters, Paging
 
@@ -78,7 +76,7 @@ class Nodes:
 
 
 # @router.get("/nodes")
-async def get_data(nodes: Nodes = Depends()):
+async def get_data_nodes(nodes: Nodes = Depends()):
     data = await nodes.fetch_data()
     return data
 
@@ -154,7 +152,7 @@ latest_jq = jq.compile(
 
 
 # @router.get("/latest")
-async def get_data(nodes: Nodes = Depends()):
+async def get_data_latest(nodes: Nodes = Depends()):
     data = await nodes.fetch_data()
     ret = latest_jq.input(data).first()
     return ret

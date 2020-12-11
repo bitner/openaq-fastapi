@@ -1,19 +1,22 @@
 import logging
-import time
-from dataclasses import asdict
-from enum import Enum
-from typing import List, Optional
+from typing import List
 
-import orjson as json
-from asyncpg.exceptions import FunctionExecutedNoReturnStatementError
-from fastapi import APIRouter, Depends, Path, Query
-from pydantic.json import pydantic_encoder
+from fastapi import APIRouter, Depends, Query
 from pydantic.typing import Literal
-from pydantic.dataclasses import dataclass
-
-from .base import (DB, City, Country, Location, Meta, OpenAQResult,
-                   Paging, Project, Sort, SourceName, parameter_dependency_from_model,
-                   maxint, HasGeo, Geo, Measurands, APIBase)
+import jq
+from .base import (
+    DB,
+    APIBase,
+    City,
+    Country,
+    Geo,
+    HasGeo,
+    Location,
+    Measurands,
+    OpenAQResult,
+    Project,
+    SourceName,
+)
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -22,14 +25,15 @@ router = APIRouter()
 
 
 class Cities(City, Country, APIBase):
-    order_by: Literal["city", "country", "firstUpdated", "lastUpdated"] = Query("city")
+    order_by: Literal[
+        "city", "country", "firstUpdated", "lastUpdated"
+    ] = Query("city")
 
 
 @router.get("/v1/cities", response_model=OpenAQResult)
 @router.get("/v2/cities", response_model=OpenAQResult)
 async def cities_get(
-    db: DB = Depends(),
-    cities: Cities = Depends(Cities.depends())
+    db: DB = Depends(), cities: Cities = Depends(Cities.depends())
 ):
     q = f"""
     WITH t AS (
@@ -67,7 +71,9 @@ async def cities_get(
 
 
 class Countries(Country, APIBase):
-    order_by: Literal["country", "firstUpdated", "lastUpdated"] = Query("country")
+    order_by: Literal["country", "firstUpdated", "lastUpdated"] = Query(
+        "country"
+    )
 
 
 @router.get("/v1/countries", response_model=OpenAQResult)
@@ -111,10 +117,12 @@ async def countries_get(
 
     return output
 
+
 class Sources(SourceName, APIBase):
     order_by: Literal["sourceName", "firstUpdated", "lastUpdated"] = Query(
         "sourceName"
     )
+
 
 @router.get("/v1/sources", response_model=OpenAQResult)
 @router.get("/v2/sources", response_model=OpenAQResult)
@@ -179,7 +187,7 @@ async def parameters_get(
     q = f"""
     WITH t AS (
     SELECT
-        measurand as id,
+        measurands_id as id,
         upper(measurand) as name,
         upper(measurand) as description,
         units as "preferredUnit"
@@ -197,26 +205,31 @@ async def parameters_get(
 
 
 class Projects(Project, APIBase):
-    order_by: Literal["id", "name", "subtitle", "firstUpdated", "lastUpdated"] = Query(
-        "id"
-    )
+    order_by: Literal[
+        "id", "name", "subtitle", "firstUpdated", "lastUpdated"
+    ] = Query("id")
+
     def where(self):
-        wheres=[]
+        wheres = []
         for f, v in self:
-            if f == 'project' and v is not None:
-                wheres.append(" groups_id = ANY(:project) ")
-            if isinstance(v, List):
-                wheres.append(f"{f} = ANY(:{f})")
-        if len(wheres) >0:
-            return (' AND ').join(wheres)
+            if v is not None:
+                if f == "project" and all(isinstance(x, int) for x in v):
+                    wheres.append(" groups_id = ANY(:project) ")
+                elif f == "project":
+                    wheres.append(" name = ANY(:project) ")
+                elif isinstance(v, List):
+                    wheres.append(f"{f} = ANY(:{f})")
+        if len(wheres) > 0:
+            return (" AND ").join(wheres)
         return " TRUE "
+
+
 @router.get("/v2/projects/{project_id}", response_model=OpenAQResult)
 @router.get("/v2/projects", response_model=OpenAQResult)
 async def projects_get(
     db: DB = Depends(),
     projects: Projects = Depends(Projects.depends()),
 ):
-
 
     q = f"""
         WITH t AS (
@@ -262,24 +275,32 @@ async def projects_get(
 
 class Locations(Location, City, Country, Geo, Measurands, HasGeo, APIBase):
     order_by: Literal[
-        "city", "country", "location", "sourceName", "firstUpdated", "lastUpdated"
-        ] = Query(
-        "lastUpdated"
-    )
+        "city",
+        "country",
+        "location",
+        "sourceName",
+        "firstUpdated",
+        "lastUpdated",
+    ] = Query("lastUpdated")
+
     def where(self):
-        wheres=[]
+        wheres = []
         for f, v in self:
-            if f == 'project' and v is not None:
-                wheres.append(" groups_id = ANY(:project) ")
-            if isinstance(v, List):
-                wheres.append(f"{f} = ANY(:{f})")
-        if len(wheres) >0:
-            return (' AND ').join(wheres)
+            if v is not None:
+                if f == "project":
+                    wheres.append(" groups_id = ANY(:project) ")
+                elif f == "location" and all(isinstance(x, int) for x in v):
+                    wheres.append(" id = ANY(:location) ")
+                elif f == "location":
+                    wheres.append(" name = ANY(:location) ")
+                elif isinstance(v, List):
+                    wheres.append(f"{f} = ANY(:{f})")
+        if len(wheres) > 0:
+            return (" AND ").join(wheres)
         return " TRUE "
 
-@router.get("/v1/locations/{location_id}", response_model=OpenAQResult)
+
 @router.get("/v2/locations/{location_id}", response_model=OpenAQResult)
-@router.get("/v1/locations", response_model=OpenAQResult)
 @router.get("/v2/locations", response_model=OpenAQResult)
 async def locations_get(
     db: DB = Depends(),
@@ -310,10 +331,85 @@ async def locations_get(
         OFFSET :offset
         ;
         """
-    logger.debug(f"{q}")
-    logger.debug(f"{locations.dict()}")
-
 
     output = await db.fetchOpenAQResult(q, locations.dict())
 
     return output
+
+
+@router.get("/v1/latest/{location_id}", response_model=OpenAQResult)
+@router.get("/v2/latest/{location_id}", response_model=OpenAQResult)
+@router.get("/v1/latest", response_model=OpenAQResult)
+@router.get("/v2/latest", response_model=OpenAQResult)
+async def latest_get(
+    db: DB = Depends(),
+    locations: Locations = Depends(Locations.depends()),
+):
+    data = await locations_get(db, locations)
+    meta = data.meta
+    res = data.results
+    if len(res) == 0:
+        return data
+
+    latest_jq = jq.compile(
+        """
+        .[] | [
+            {
+                location: .name,
+                city: .city,
+                country: .country,
+                measurements: [
+                    .parameters[] | {
+                        parameter: .measurand,
+                        value: .lastValue,
+                        lastUpdated: .lastUpdated,
+                        unit: .unit
+                    }
+                ]
+            }
+        ]
+        """
+    )
+
+    ret = latest_jq.input(res).all()
+    return OpenAQResult(meta=meta, results=ret)
+
+
+@router.get("/v1/locations/{location_id}", response_model=OpenAQResult)
+@router.get("/v1/locations", response_model=OpenAQResult)
+async def locationsv1_get(
+    db: DB = Depends(),
+    locations: Locations = Depends(Locations.depends()),
+):
+    data = await locations_get(db, locations)
+    meta = data.meta
+    res = data.results
+
+    latest_jq = jq.compile(
+        """
+        .[] | [
+            {
+                id: .id,
+                country: .country,
+                city: .city,
+                location: .name,
+                soureName: .source_name,
+                sourceType: .sources[0].name,
+                coordinates: .coordinates,
+                firstUpdated: .firstUpdated,
+                lastUpdated: .lastUpdated,
+                parameters : [ .parameters[].measurand ],
+                countsByMeasurement: [
+                    .parameters[] | {
+                        parameter: .measurand,
+                        count: .count
+                    }
+                ],
+                count: .parameters| map(.count) | add
+            }
+        ]
+        """
+    )
+
+    ret = latest_jq.input(res).all()
+    return OpenAQResult(meta=meta, results=ret)

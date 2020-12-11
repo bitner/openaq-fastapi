@@ -1,20 +1,26 @@
 import logging
-from typing import Any
+from typing import Any, List
 
 import asyncpg
+from fastapi.exceptions import RequestValidationError
 import orjson
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.openapi.models import Server
 from mangum import Mangum
+from pydantic import BaseModel, ValidationError
 from starlette.responses import JSONResponse
-
-from .middleware import CacheControlMiddleware, TotalTimeMiddleware, StripParametersMiddleware
+from fastapi.encoders import jsonable_encoder
+from .middleware import (
+    CacheControlMiddleware,
+    StripParametersMiddleware,
+    TotalTimeMiddleware,
+)
 from .routers.averages import router as averages_router
-from .routers.measurements import router as measurements_router
+
 # from .routers.nodes import router as nodes_router
 from .routers.lookups import router as lookups_router
+from .routers.measurements import router as measurements_router
 from .settings import settings
 
 logger = logging.getLogger("locations")
@@ -25,8 +31,8 @@ class ORJSONResponse(JSONResponse):
     def render(self, content: Any) -> bytes:
         return orjson.dumps(content)
 
-servers = [{"url": settings.OPENAQ_FASTAPI_URL}]
 
+servers = [{"url": settings.OPENAQ_FASTAPI_URL}]
 
 
 app = FastAPI(
@@ -47,6 +53,27 @@ app.add_middleware(
 app.add_middleware(StripParametersMiddleware)
 app.add_middleware(CacheControlMiddleware, cachecontrol="public, max-age=900")
 app.add_middleware(TotalTimeMiddleware)
+
+
+class OpenAQValidationResponseDetail(BaseModel):
+    loc: List[str] = None
+    msg: str = None
+    type: str = None
+
+
+class OpenAQValidationResponse(BaseModel):
+    detail: List[OpenAQValidationResponseDetail] = None
+
+
+@app.exception_handler(RequestValidationError)
+@app.exception_handler(ValidationError)
+async def openaq_exception_handler(request, exc):
+    detail = orjson.loads(exc.json())
+    logger.debug(f"{detail}")
+    detail = OpenAQValidationResponse(detail=detail)
+    return ORJSONResponse(status_code=422, content=jsonable_encoder(detail))
+
+
 
 
 @app.on_event("startup")
@@ -88,12 +115,17 @@ app.include_router(lookups_router)
 
 handler = Mangum(app, enable_lifespan=False)
 
+
 def run():
     try:
         import uvicorn
-        uvicorn.run('openaq_fastapi.main:app', host="0.0.0.0", port=8888, reload=True)
-    except:
+
+        uvicorn.run(
+            "openaq_fastapi.main:app", host="0.0.0.0", port=8888, reload=True
+        )
+    except Exception:
         pass
+
 
 if __name__ == "__main__":
     run()

@@ -1,20 +1,22 @@
+import logging
+import re
 import time
 from typing import Optional
-import re
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.types import ASGIApp
 
-import logging
-
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
+
 
 class CacheControlMiddleware(BaseHTTPMiddleware):
     """MiddleWare to add CacheControl in response headers."""
 
-    def __init__(self, app: ASGIApp, cachecontrol: Optional[str] = None) -> None:
+    def __init__(
+        self, app: ASGIApp, cachecontrol: Optional[str] = None
+    ) -> None:
         """Init Middleware."""
         super().__init__(app)
         self.cachecontrol = cachecontrol
@@ -52,23 +54,12 @@ class StripParametersMiddleware(BaseHTTPMiddleware):
     """MiddleWare to strip [] from parameter names."""
 
     async def dispatch(self, request: Request, call_next):
-        logger.debug(f'****************** {request.url}')
-
-        # params = parse.parse_qsl(parse.urlsplit(str(request.url)).query)
-        # params = [(str.replace(p[0],'[]',''), p[1]) for p in params]
-        # request.query_params = QueryParams(params)
-
-        # logger.debug(params)
+        logger.debug(f"****************** {request.url}")
         newscope = request.scope
-        # logger.debug(f"NEW BEFORE: {newscope}")
-        qs = newscope['query_string'].decode('utf-8')
-        newqs = re.sub(r'\[\d*\]', '', qs).encode('utf-8')
-        newscope['query_string'] = newqs
-        # logger.debug(f'NEW AFTER: {newscope}')
+        qs = newscope["query_string"].decode("utf-8")
+        newqs = re.sub(r"\[\d*\]", "", qs).encode("utf-8")
+        newscope["query_string"] = newqs
         new_request = Request(scope=newscope)
-        # logger.debug(f"{new_request.scope}")
-
-
 
         response = await call_next(new_request)
 
