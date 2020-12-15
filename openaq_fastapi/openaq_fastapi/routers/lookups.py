@@ -16,7 +16,7 @@ from .base import (
     OpenAQResult,
     Project,
     SourceName,
-    Sort
+    Sort,
 )
 
 logger = logging.getLogger("locations")
@@ -251,7 +251,8 @@ async def projects_get(
                 max(last_datetime) as "lastUpdated",
                 min(first_datetime) as "firstUpdated"
             FROM
-                rollups.rollups LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+                rollups.rollups LEFT JOIN rollups.groups_view
+                USING (groups_id, measurands_id)
             WHERE
                 type='source' AND rollup='total'
                 AND {projects.where()}
@@ -268,16 +269,17 @@ async def projects_get(
             sources,
             sum(count) as measurements,
             max(locations) as locations,
-            jsonb_agg(to_jsonb(bysensor) - '{{id,name,subtitle,geog,sources}}'::text[]) as parameters
+            jsonb_agg(to_jsonb(bysensor) -
+            '{{id,name,subtitle,geog,sources}}'::text[]) as parameters
             FROM bysensor
             GROUP BY 1,2,3,4,5
         )
-        select count(*) OVER () as count, to_jsonb(overall) as json from overall
+        select count(*) OVER () as count, to_jsonb(overall) as json
+        from overall
         LIMIT :limit
         OFFSET :offset
             ;
     """
-
 
     output = await db.fetchOpenAQResult(q, projects.dict())
 
@@ -311,8 +313,11 @@ class Locations(Location, City, Country, Geo, Measurands, HasGeo, APIBase):
                 elif f == "location":
                     wheres.append(" name = ANY(:location) ")
                 elif f == "parameter":
-                    wheres.append("""
-                        parameters @> ANY(jsonb_array_query('measurand',:parameter::text[]))
+                    wheres.append(
+                        """
+                        parameters @> ANY(
+                            jsonb_array_query('measurand',:parameter::text[])
+                            )
                         """
                     )
                 elif f == "isMobile":

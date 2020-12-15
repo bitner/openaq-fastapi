@@ -1,8 +1,8 @@
 from datetime import date
 from typing import Dict, List, Optional, Union
-from pydantic
-from pydantic.main import BaseModel BaseModel
+from pydantic.main import BaseModel
 from pydantic.typing import Any
+from ..settings import settings
 
 
 class Meta(BaseModel):

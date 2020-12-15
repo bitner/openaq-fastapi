@@ -18,7 +18,6 @@ from .base import (
     OpenAQResult,
     Meta,
     Sort,
-    fix_datetime,
 )
 
 logger = logging.getLogger("locations")
@@ -85,7 +84,7 @@ async def measurements_get(
     if m.is_mobile is None:
         if (
             (m.location is None or len(m.location)) == 0
-            and is_mobile is None
+            and m.is_mobile is None
             and m.coordinates is None
         ):
             joins = ""
@@ -205,9 +204,11 @@ async def measurements_get(
                         location,
                         parameter,
                         json_build_object(
-                                    'utc', format_timestamp(datetime, 'UTC'),
-                                    'local', format_timestamp(datetime, timezone)
-                                ) as date,
+                            'utc',
+                            format_timestamp(datetime, 'UTC'),
+                            'local',
+                            format_timestamp(datetime, timezone)
+                        ) as date,
                         unit,
                         json_build_object(
                                 'latitude', st_y(geog::geometry),
@@ -218,7 +219,8 @@ async def measurements_get(
                         ismobile as "isMobile"
                     FROM t
                 )
-                SELECT {count}::bigint as count, row_to_json(t1) as json FROM t1;
+                SELECT {count}::bigint as count,
+                row_to_json(t1) as json FROM t1;
             """
 
             rows = await db.fetch(q, qparams)
@@ -234,7 +236,8 @@ async def measurements_get(
                         ]
                     )
             logger.debug(
-                f"ran query... {rc} {rangestart} {date_from_adj}{rangeend} {date_to_adj}"
+                f"ran query... {rc} {rangestart}"
+                f" {date_from_adj}{rangeend} {date_to_adj}"
             )
             if m.sort == "desc":
                 rangestart -= delta
@@ -243,7 +246,8 @@ async def measurements_get(
                 rangestart += delta
                 rangeend += delta
             logger.debug(
-                f"stepped ranges... {rc} {rangestart} {date_from_adj}{rangeend} {date_to_adj}"
+                f"stepped ranges... {rc} {rangestart}"
+                f" {date_from_adj}{rangeend} {date_to_adj}"
             )
             qparams["rangestart"] = rangestart
             qparams["rangeend"] = rangeend

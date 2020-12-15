@@ -21,6 +21,7 @@ from .routers.averages import router as averages_router
 # from .routers.nodes import router as nodes_router
 from .routers.lookups import router as lookups_router
 from .routers.measurements import router as measurements_router
+from .routers.mvt import router as mvt_router
 from .settings import settings
 
 logger = logging.getLogger("locations")
@@ -74,8 +75,6 @@ async def openaq_exception_handler(request, exc):
     return ORJSONResponse(status_code=422, content=jsonable_encoder(detail))
 
 
-
-
 @app.on_event("startup")
 async def startup_event():
     """
@@ -112,6 +111,7 @@ def pong():
 app.include_router(measurements_router)
 app.include_router(averages_router)
 app.include_router(lookups_router)
+app.include_router(mvt_router)
 
 handler = Mangum(app, enable_lifespan=False)
 
