@@ -165,7 +165,7 @@ async def averages_v2_get(
             temporal_order = "to_char(st, 'ID')"
 
         if av.temporal in ["dow", "moy"]:
-            group_clause = " GROUP BY 1,2,3,4,5,6,7 "
+            group_clause = " GROUP BY 1,2,3,4,5,6,7,8 "
             agg_clause = """
                 sum(value_count) as measurement_count,
                 round((sum(value_sum)/sum(value_count))::numeric, 4) as average
