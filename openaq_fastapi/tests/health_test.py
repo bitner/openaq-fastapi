@@ -8,6 +8,9 @@ from fastapi.testclient import TestClient
 from openaq_fastapi.settings import settings
 from openaq_fastapi.main import app
 
+import os
+dir_path = os.path.dirname(os.path.realpath(__file__))
+
 schemathesis.fixups.install()
 client = None
 if settings.TESTLOCAL:
@@ -18,9 +21,6 @@ else:
         f"{settings.OPENAQ_FASTAPI_URL}/openapi.json"
     )
 
-    class client:
-        def get(url):
-            return requests.get(f"{settings.OPENAQ_FASTAPI_URL}{url}")
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def url_list():
     List of preivously broken URLs to check to insure no regressions
     """
 
-    with open("./url_list.txt") as file:
+    with open(os.path.join(dir_path, "url_list.txt")) as file:
         urls = [line.rstrip() for line in file]
     return urls
 
@@ -57,7 +57,7 @@ def test_ok_status(url_list, max_wait):
             with TestClient(app) as client:
                 r = client.get(url)
         else:
-            r = client.get(url)
+            r = requests.get(f"{settings.OPENAQ_FASTAPI_URL}{url}")
         assert r.status_code == requests.codes.ok
         assert r.elapsed.total_seconds() < max_wait
 
