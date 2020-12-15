@@ -12,6 +12,7 @@ setup(
     long_description=open("README.md").read(),
     install_requires=[
         "fastapi @ git+https://github.com/bitner/fastapi.git@multialias",
+        "timvt @ git+https://github.com/developmentseed/timvt.git",
         "mangum>=0.1.0",
         "fastapi-utils",
         "wheel",
