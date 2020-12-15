@@ -47,12 +47,18 @@ class Averages(APIBase, Country, Project, Measurands, DateRange):
 
     @root_validator
     def validate_date_range(cls, values):
-        date_from = values.get('date_from')
-        date_to = values.get('date_to')
-        if (date_to - date_from).total_seconds() > 31*24*60*60:
-            raise ValueError('Date range cannot excede 1 month for hourly queries')
-        return values
+        date_from = values.get("date_from")
+        date_to = values.get("date_to")
+        temporal = values.get("temporal")
 
+        if (
+            temporal in ["hour", "hod"]
+            and (date_to - date_from).total_seconds() > 31 * 24 * 60 * 60
+        ):
+            raise ValueError(
+                "Date range cannot excede 1 month for hourly queries"
+            )
+        return values
 
 
 @router.get("/v1/averages", response_model=OpenAQResult)
@@ -106,12 +112,11 @@ async def averages_v2_get(
 
     temporal = av.temporal
 
-
     # hourly data does not use any rollups
-    if av.temporal in ['hour', 'hod']:
+    if av.temporal in ["hour", "hod"]:
         # enforce limit of one month
 
-        if av.temporal == 'hour':
+        if av.temporal == "hour":
             temporal_col = "date_trunc('hour', datetime)"
         else:
             temporal_col = "extract('hour' from datetime)"

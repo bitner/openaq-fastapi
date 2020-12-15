@@ -8,6 +8,9 @@ from fastapi.testclient import TestClient
 from openaq_fastapi.settings import settings
 from openaq_fastapi.main import app
 
+import os
+dir_path = os.path.dirname(os.path.realpath(__file__))
+
 schemathesis.fixups.install()
 client = None
 if settings.TESTLOCAL:
@@ -29,7 +32,7 @@ def url_list():
     List of preivously broken URLs to check to insure no regressions
     """
 
-    with open("./url_list.txt") as file:
+    with open(os.path.join(dir_path, "url_list.txt")) as file:
         urls = [line.rstrip() for line in file]
     return urls
 
