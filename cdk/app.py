@@ -5,6 +5,9 @@ from aws_cdk.aws_apigatewayv2 import HttpApi, HttpMethod
 from aws_cdk.aws_apigatewayv2_integrations import LambdaProxyIntegration
 from aws_cdk.aws_lambda_python import PythonFunction
 
+from os import getenv
+
+OPENAQ_ENV = getenv('OPENAQ_ENV', '')
 
 class LambdaApiStack(core.Stack):
     """
@@ -48,7 +51,7 @@ class LambdaApiStack(core.Stack):
 
 
 app = core.App()
-stack = LambdaApiStack(app, "openaq-lcs-api")
+stack = LambdaApiStack(app, f"openaq-lcs-api{OPENAQ_ENV}")
 core.Tags.of(stack).add("devseed", "true")
 core.Tags.of(stack).add("lcs", "true")
 app.synth()

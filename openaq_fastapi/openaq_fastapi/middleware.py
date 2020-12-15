@@ -1,3 +1,5 @@
+import logging
+import re
 import time
 from typing import Optional
 
@@ -5,11 +7,16 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.types import ASGIApp
 
+logger = logging.getLogger("locations")
+logger.setLevel(logging.DEBUG)
+
 
 class CacheControlMiddleware(BaseHTTPMiddleware):
     """MiddleWare to add CacheControl in response headers."""
 
-    def __init__(self, app: ASGIApp, cachecontrol: Optional[str] = None) -> None:
+    def __init__(
+        self, app: ASGIApp, cachecontrol: Optional[str] = None
+    ) -> None:
         """Init Middleware."""
         super().__init__(app)
         self.cachecontrol = cachecontrol
@@ -40,4 +47,20 @@ class TotalTimeMiddleware(BaseHTTPMiddleware):
         response.headers["Server-Timing"] = (
             f"{timings}, {app_time}" if timings else app_time
         )
+        return response
+
+
+class StripParametersMiddleware(BaseHTTPMiddleware):
+    """MiddleWare to strip [] from parameter names."""
+
+    async def dispatch(self, request: Request, call_next):
+        logger.debug(f"****************** {request.url}")
+        newscope = request.scope
+        qs = newscope["query_string"].decode("utf-8")
+        newqs = re.sub(r"\[\d*\]", "", qs).encode("utf-8")
+        newscope["query_string"] = newqs
+        new_request = Request(scope=newscope)
+
+        response = await call_next(new_request)
+
         return response

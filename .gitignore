@@ -183,3 +183,4 @@ dist/
 *slicer-temp*
 gwt-unitCache
 .sass-cache/
+.direnv/

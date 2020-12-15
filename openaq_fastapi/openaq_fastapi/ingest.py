@@ -1,14 +1,12 @@
-import boto3
-
-from .settings import settings
 import gzip
 import io
 import json
-import sys
-import psycopg2
 import time
 
+import boto3
+import psycopg2
 
+from .settings import settings
 
 
 class StringIteratorIO(io.TextIOBase):
@@ -47,7 +45,6 @@ class StringIteratorIO(io.TextIOBase):
         return "".join(line)
 
 
-
 def clean_csv_value(value):
     if value is None:
         return r"\N"
@@ -77,8 +74,14 @@ def parse_json(j):
         and "latitude" in j["coordinates"]
     ):
         c = j.pop("coordinates")
-        coords = (
-            "SRID=4326;POINT(" + str(c["longitude"]) + " " + str(c["latitude"]) + ")"
+        coords = "".join(
+            (
+                "SRID=4326;POINT(",
+                str(c["longitude"]),
+                " ",
+                str(c["latitude"]),
+                ")",
+            )
         )
     else:
         coords = None
@@ -99,16 +102,16 @@ def parse_json(j):
         source_type,
         mobile,
         avpd_unit,
-        avpd_value
+        avpd_value,
     ]
     linestr = "\t".join(map(clean_csv_value, row)) + "\n"
     return linestr
 
 
-AWS_BUCKET='openaq-fetches'
+AWS_BUCKET = "openaq-fetches"
 s3 = boto3.resource("s3")
 
-processquery = '''
+processquery = """
         CREATE TEMP TABLE IF NOT EXISTS tempfetchdata_sensors AS
         WITH t AS (
         SELECT DISTINCT
@@ -169,7 +172,12 @@ processquery = '''
             jsonb_strip_nulls(
                 COALESCE(data, '{}'::jsonb)
                 ||
-                jsonb_build_object('source_type', 'government', 'origin', 'openaq')
+                jsonb_build_object(
+                    'source_type',
+                    'government',
+                    'origin',
+                    'openaq'
+                    )
             ),
         sensor_metadata = jsonb_strip_nulls(jsonb_build_object(
             'data_averaging_period_seconds', avpd_value * 3600
@@ -208,7 +216,9 @@ processquery = '''
             null::geometry as geom,
             array_agg(tfsid) as tfsids
         FROM tempfetchdata_sensors
-        WHERE geom IS NULL AND site_name is not null and source_name is not null
+        WHERE geom IS NULL
+        AND site_name is not null
+        and source_name is not null
         GROUP BY
             site_name, source_name, sensor_nodes_id
         ) as nogeom
@@ -218,16 +228,21 @@ processquery = '''
 
         -- Lookup Node Ids
 
-        UPDATE tempfetchdata_nodes t SET sensor_nodes_id = sn.sensor_nodes_id FROM
+        UPDATE tempfetchdata_nodes t
+        SET sensor_nodes_id = sn.sensor_nodes_id FROM
         sensor_nodes sn
         WHERE t.geom is not null
         AND st_dwithin(sn.geom, t.geom, .0001);
 
-        UPDATE tempfetchdata_nodes t SET sensor_nodes_id = sn.sensor_nodes_id FROM
+        UPDATE tempfetchdata_nodes t
+        SET sensor_nodes_id = sn.sensor_nodes_id FROM
         sensor_nodes sn
         WHERE
         t.sensor_nodes_id is null AND
-        t.site_name is not null and t.source_name is not null and t.site_name = sn.site_name and t.source_name=sn.source_name;
+        t.site_name is not null
+        and t.source_name is not null
+        and t.site_name = sn.site_name
+        and t.source_name=sn.source_name;
 
         -- Update any records that have changed
 
@@ -289,18 +304,21 @@ processquery = '''
         RETURNING *
         )
         UPDATE tempfetchdata_nodes tf SET sensor_nodes_id = sn.sensor_nodes_id
-        FROM sn WHERE tf.sensor_nodes_id is null and row(tf.site_name, tf.geom, tf.source_name) is not distinct
+        FROM sn WHERE tf.sensor_nodes_id is null
+        and row(tf.site_name, tf.geom, tf.source_name) is not distinct
         from row(sn.site_name, sn.geom, sn.source_name);
 
 
         -- Get sensor systems
 
 
-        UPDATE tempfetchdata_nodes t SET sensor_systems_id = ss.sensor_systems_id FROM
+        UPDATE tempfetchdata_nodes t
+        SET sensor_systems_id = ss.sensor_systems_id FROM
         sensor_systems ss
         WHERE t.sensor_nodes_id = ss.sensor_nodes_id;
 
-        -- Add any rows that did not get an id into the rejects table and then delete
+        -- Add any rows that did not get an id
+        -- into the rejects table and then delete
         INSERT INTO rejects
         SELECT clock_timestamp(), 'sensor_nodes', to_jsonb(tf) FROM
         tempfetchdata_nodes tf WHERE sensor_nodes_id IS NULL;
@@ -312,10 +330,13 @@ processquery = '''
         SELECT DISTINCT sensor_nodes_id FROM tempfetchdata_nodes t
         WHERE t.sensor_systems_id is NULL AND t.sensor_nodes_id IS NOT NULL
         RETURNING *
-        ) UPDATE tempfetchdata_nodes tf SET sensor_systems_id = ss.sensor_systems_id
-        FROM ss WHERE tf.sensor_nodes_id=ss.sensor_nodes_id and tf.sensor_systems_id is null;
+        ) UPDATE tempfetchdata_nodes tf
+        SET sensor_systems_id = ss.sensor_systems_id
+        FROM ss WHERE tf.sensor_nodes_id=ss.sensor_nodes_id
+        and tf.sensor_systems_id is null;
 
-        -- Add any rows that did not get an id into the rejects table and then delete
+        -- Add any rows that did not get an id
+        -- into the rejects table and then delete
         INSERT INTO rejects
         SELECT clock_timestamp(), 'sensor_systems', to_jsonb(tf) FROM
         tempfetchdata_nodes tf WHERE sensor_systems_id IS NULL;
@@ -342,7 +363,8 @@ processquery = '''
         WHERE t.measurands_id is NULL
         RETURNING *
         ) UPDATE tempfetchdata_sensors tf SET measurands_id = m.measurands_id
-        FROM m WHERE tf.measurand=m.measurand and tf.units=m.units and tf.measurands_id is null;
+        FROM m WHERE tf.measurand=m.measurand
+        and tf.units=m.units and tf.measurands_id is null;
 
         -- get cleaned sensors table
         CREATE TEMP TABLE IF NOT EXISTS tempfetchdata_sensors_clean AS
@@ -366,11 +388,14 @@ processquery = '''
             and
             t.measurands_id = s.measurands_id
         ;
-        -- Add any rows that did not get an id into the rejects table and then delete
+        -- Add any rows that did not get an id
+        -- into the rejects table and then delete
         INSERT INTO rejects
         SELECT clock_timestamp(), 'sensors', to_jsonb(tf) FROM
-        tempfetchdata_sensors_clean tf WHERE sensor_systems_id IS NULL or measurands_id is null;
-        DELETE FROM tempfetchdata_sensors_clean WHERE sensor_systems_id IS NULL or measurands_id is null;
+        tempfetchdata_sensors_clean tf
+         WHERE sensor_systems_id IS NULL or measurands_id is null;
+        DELETE FROM tempfetchdata_sensors_clean
+        WHERE sensor_systems_id IS NULL or measurands_id is null;
 
         -- add any sensors that don't exist
         WITH s AS (
@@ -404,7 +429,8 @@ processquery = '''
         tempfetchdata_sensors_clean ts WHERE
         t.tfdid = ANY(ts.tfdids);
 
-        -- Add any rows that did not get an id into the rejects table and then delete
+        -- Add any rows that did not get an id into
+        -- the rejects table and then delete
         INSERT INTO rejects
         SELECT clock_timestamp(), 'sensors', to_jsonb(tf) FROM
         tempfetchdata tf WHERE sensors_id IS NULL;
@@ -415,16 +441,16 @@ processquery = '''
         FROM tempfetchdata
         ON CONFLICT DO NOTHING;
         SELECT min(datetime), max(datetime) FROM tempfetchdata;
-    '''
+    """
+
 
 def load_fetch_file(key):
     obj = s3.Object(AWS_BUCKET, key)
-    with psycopg2.connect(
-        settings.DATABASE_WRITE_URL
-    ) as connection:
+    with psycopg2.connect(settings.DATABASE_WRITE_URL) as connection:
         connection.set_session(autocommit=False)
         with connection.cursor() as cursor:
-            cursor.execute('''
+            cursor.execute(
+                """
                 CREATE TEMP TABLE IF NOT EXISTS tempfetchdata (
                     location text,
                     value float,
@@ -443,10 +469,13 @@ def load_fetch_file(key):
                     tfdid int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                     sensors_id int
                 ) ON COMMIT DROP;
-            ''')
+            """
+            )
             with gzip.GzipFile(fileobj=obj.get()["Body"]) as gz:
                 f = io.BufferedReader(gz)
-                iterator = StringIteratorIO((parse_json(json.loads(line)) for line in f))
+                iterator = StringIteratorIO(
+                    (parse_json(json.loads(line)) for line in f)
+                )
                 try:
                     cursor.copy_expert(
                         """
@@ -467,13 +496,13 @@ def load_fetch_file(key):
                             avpd_value
                         ) FROM STDIN;
                         """,
-                        iterator
+                        iterator,
                     )
                     print(connection.notices)
                     # print('query:', cursor.query)
-                    print('status:', cursor.statusmessage)
+                    print("status:", cursor.statusmessage)
                 except Exception as e:
-                    print('full copy failed', key, e)
+                    print("full copy failed", key, e)
             cursor.execute(processquery)
             print(cursor.statusmessage)
             print(connection.notices)
@@ -504,25 +533,29 @@ def load_fetch_file(key):
             # ''', (mindate, maxdate,))
             # print (connection.notices)
 
-
             connection.commit()
+
 
 def load_fetch_day(day):
     start = time.time()
-    conn = boto3.client('s3')
-    prefix=f'realtime-gzipped/{day}'
-    keys=[]
-    for f in conn.list_objects(Bucket=AWS_BUCKET, Prefix=prefix)['Contents']:
-        # print(f['Key'])
-        keys.append(f['Key'])
+    conn = boto3.client("s3")
+    prefix = f"realtime-gzipped/{day}"
+    keys = []
+    try:
+        for f in conn.list_objects(Bucket=AWS_BUCKET, Prefix=prefix)[
+            "Contents"
+        ]:
+            # print(f['Key'])
+            keys.append(f["Key"])
+    except Exception:
+        print(f"no data found for {day}")
+        return None
 
-
-    with psycopg2.connect(
-        settings.DATABASE_WRITE_URL
-    ) as connection:
+    with psycopg2.connect(settings.DATABASE_WRITE_URL) as connection:
         connection.set_session(autocommit=False)
         with connection.cursor() as cursor:
-            cursor.execute('''
+            cursor.execute(
+                """
                 CREATE TEMP TABLE IF NOT EXISTS tempfetchdata (
                     location text,
                     value float,
@@ -541,13 +574,16 @@ def load_fetch_day(day):
                     tfdid int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                     sensors_id int
                 ) ON COMMIT DROP;
-            ''')
+            """
+            )
             for key in keys:
                 obj = s3.Object(AWS_BUCKET, key)
-                print(f'copying {key}')
+                print(f"copying {key}")
                 with gzip.GzipFile(fileobj=obj.get()["Body"]) as gz:
                     f = io.BufferedReader(gz)
-                    iterator = StringIteratorIO((parse_json(json.loads(line)) for line in f))
+                    iterator = StringIteratorIO(
+                        (parse_json(json.loads(line)) for line in f)
+                    )
                     try:
                         cursor.copy_expert(
                             """
@@ -568,23 +604,33 @@ def load_fetch_day(day):
                                 avpd_value
                             ) FROM STDIN;
                             """,
-                            iterator
+                            iterator,
                         )
                         # print(connection.notices)
                         # print('query:', cursor.query)
                         # print('status:', cursor.statusmessage)
                     except Exception as e:
-                        print('full copy failed', key, e)
-            print(f'All data copied {time.time()-start}')
-            cursor.execute('''
+                        print("full copy failed", key, e)
+            print(f"All data copied {time.time()-start}")
+            cursor.execute(
+                """
                 DELETE FROM tempfetchdata WHERE datetime
-                NOT BETWEEN %s::timestamptz - '1 hour'::interval and %s::timestamptz + '1 days'::interval;
-                DELETE FROM tempfetchdata WHERE coords is null and source_name is null and location is null;
-                ''', (day, day,)
+                NOT BETWEEN %s::timestamptz - '1 hour'::interval
+                and %s::timestamptz + '1 days'::interval;
+                DELETE FROM tempfetchdata WHERE coords is null
+                and source_name is null and location is null;
+                """,
+                (
+                    day,
+                    day,
+                ),
             )
-            print(f'Removed data not from within 24 hours of this day {time.time()-start}')
+            print(
+                f"Removed data not from within 24 hours of this day "
+                f"{time.time()-start}"
+            )
             cursor.execute(processquery)
-            print(f'Processed data {time.time()-start}')
+            print(f"Processed data {time.time()-start}")
             print(cursor.statusmessage)
             print(connection.notices)
             mindate, maxdate = cursor.fetchone()
@@ -616,18 +662,19 @@ def load_fetch_day(day):
 
             # print(f'Updated materialized views {time.time()-start}')
 
-
             # connection.commit()
 
+
 def load_prefix(prefix):
-    conn = boto3.client('s3')
-    for f in conn.list_objects(Bucket=AWS_BUCKET, Prefix=prefix)['Contents']:
-        print(f['Key'])
-        load_fetch_file(f['Key'])
+    conn = boto3.client("s3")
+    for f in conn.list_objects(Bucket=AWS_BUCKET, Prefix=prefix)["Contents"]:
+        print(f["Key"])
+        load_fetch_file(f["Key"])
 
 
 def load_range(start, end):
-    from datetime import date, timedelta
+    from datetime import timedelta
+
     step = timedelta(days=1)
     while start < end:
         load_fetch_day(start)

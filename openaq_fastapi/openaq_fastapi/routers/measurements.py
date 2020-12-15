@@ -1,11 +1,25 @@
 import logging
-import time
 
 import orjson as json
-from fastapi import APIRouter, Depends
-
-from .base import DB, MeasurementFilters, MeasurementPaging
-from datetime import timedelta
+from dateutil.tz import UTC
+from datetime import timedelta, datetime
+from fastapi import APIRouter, Depends, Query
+from pydantic.typing import Literal
+from .base import (
+    DB,
+    APIBase,
+    City,
+    Country,
+    DateRange,
+    Geo,
+    HasGeo,
+    Location,
+    Measurands,
+    OpenAQResult,
+    Meta,
+    Sort,
+    fix_datetime,
+)
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -13,202 +27,233 @@ logger.setLevel(logging.DEBUG)
 router = APIRouter()
 
 
-@router.get("/measurements")
-async def locations_get(
-    db: DB = Depends(),
-    paging: MeasurementPaging = Depends(),
-    filters: MeasurementFilters = Depends(),
+class Measurements(
+    Location, City, Country, Geo, Measurands, HasGeo, APIBase, DateRange
 ):
-    start = time.time()
-    paging_q = await paging.sql()
-    where_q = await filters.sql()
-    date_from = paging.date_from
-    date_to = paging.date_to
-    date_from_adj = paging.date_from_adj
-    date_to_adj = paging.date_to_adj
-    include_fields_q = await filters.measurement_fields()
+    order_by: Literal["city", "country", "location", "datetime"] = Query(
+        "datetime"
+    )
+    sort: Sort = "desc"
+    is_mobile: bool = None
 
-    params = {
-        "date_to": date_to,
-        "date_from": date_from,
-        "date_to_adj": date_to_adj,
-        "date_from_adj": date_from_adj,
-        "totalrows": paging.totalrows,
-    }
-    params.update(paging_q["params"])
-    params.update(where_q["params"])
-
-    where_sql = where_q["q"]
-    paging_sql = paging_q["q"]
-
-    # monthly_count_q = f"""
-    #     WITH base AS (
-    #         SELECT
-    #             month,
-    #             sum(value_count) as cnt
-    #         FROM
-    #             measurements_web_base
-    #             LEFT JOIN sensors_monthly USING (sensors_id)
-    #         WHERE
-    #             month >= :date_from::timestamptz
-    #             AND
-    #             month <= :date_to::timestamptz - '1 month'::interval
-    #             AND
-    #             {where_sql}
-    #         GROUP BY 1 ORDER BY 1 DESC
-    #     ),
-    #     subgroups AS (
-    #         SELECT
-    #             month,
-    #             --sum(cnt) OVER () AS total,
-    #             sum(cnt) OVER (
-    #                 ORDER BY month DESC
-    #                 ROWS BETWEEN
-    #                 UNBOUNDED PRECEDING
-    #                 AND
-    #                 CURRENT ROW) AS running
-    #         FROM base
-    #     ),
-    #     gtmonth AS (
-    #     SELECT month, running FROM subgroups WHERE running>:totalrows
-    #     ORDER BY 1 DESC LIMIT 1 )
-    #     SELECT
-    #         sum(cnt) as total,
-    #         CASE WHEN gtmonth.month IS NOT NULL THEN gtmonth.month ELSE :date_from::timestamptz END as month
-    #     FROM
-    #         base, gtmonth
-    #     GROUP BY base.month, gtmonth.month
-    #     UNION ALL SELECT 0, :date_from::timestamptz
-    #     ORDER BY total desc limit 1;
-    #     """
-
-    estimated_count_q = f"""
-        EXPLAIN (FORMAT JSON)
-        SELECT 1 FROM measurements_web
-        WHERE
-            datetime >= :date_from::timestamptz
-            AND
-            datetime <= :date_to::timestamptz
-            AND
-            {where_sql}
-        ;
-        """
-
-    estimate_j = await db.fetchval(estimated_count_q, params)
-    count = json.loads(estimate_j)[0]['Plan']['Plan Rows']
-    logger.debug(f"Estimate: {count}")
-
-    # get estimated count for adjusted date to see if we need to widen the window
-    estimated_count_q = f"""
-        EXPLAIN (FORMAT JSON)
-        SELECT 1 FROM measurements_web
-        WHERE
-            datetime >= :date_from_adj::timestamptz
-            AND
-            datetime <= :date_to_adj::timestamptz
-            AND
-            {where_sql}
-        ;
-        """
-
-    estimate_j = await db.fetchval(estimated_count_q, params)
-    limcount = json.loads(estimate_j)[0]['Plan']['Plan Rows']
-    logger.debug(f"Estimate: {limcount}")
-
-    tries = 0;
-    while count > 0 and limcount < 100000 and tries < 10:
-        date_from_adj = date_from_adj - timedelta(days=pow(3,tries))
-        params['date_from_adj'] = date_from_adj
-        estimate_j = await db.fetchval(estimated_count_q, params)
-        limcount = json.loads(estimate_j)[0]['Plan']['Plan Rows']
-        logger.debug(f"Estimate: {limcount}")
-        tries += 1
-
-
-
-    # monthly_count_q = f"""
-    #     SELECT
-    #         sum(value_count) as cnt
-    #     FROM
-    #         measurements_web_base
-    #         LEFT JOIN sensors_monthly USING (sensors_id)
-    #     WHERE
-    #         month >= :date_from::timestamptz
-    #         AND
-    #         month <= :date_to::timestamptz - '1 month'::interval
-    #         AND
-    #         {where_sql}
-    #     ;
-    #     """
-
-    # monthly_row = await db.fetchrow(monthly_count_q, params)
-    # # logger.debug(f"monthly row {monthly_row['total']} {monthly_row['month']}")
-    # monthly_count = monthly_row['cnt']
-    # # if monthly_row['month']:
-    # #     date_from_adj = monthly_row['month']
-    # #     params['date_from_adj'] = date_from_adj
-    # if not monthly_count:
-    #     monthly_count = 0
-
-    # remainder_count_q = f"""
-    #     SELECT
-    #         sum(value_count) as cnt
-    #     FROM measurements_web_base
-    #     LEFT JOIN sensors_daily USING (sensors_id)
-    #     WHERE
-    #             day >= date_trunc('month', :date_to::timestamptz)
-    #         AND
-    #             day < :date_to::timestamptz
-    #         AND {where_sql}
-    #     """
-
-    # remainder_count = await db.fetchval(remainder_count_q, params)
-    # if not remainder_count:
-    #     remainder_count = 0
-
-    # count = monthly_count + remainder_count
-
-    if count > 0:
-        q = f"""
-        WITH t AS (
-            SELECT
-                site_name as location,
-                measurand as parameter,
-                json_build_object(
-                                'utc', datetime
-                            ) as date,
-                units as unit,
-                json_build_object(
-                            'latitude', lat,
-                            'longitude', lon
-                        ) as coordinates,
-                country,
-                city
-                {include_fields_q}
-            FROM measurements_web
-            WHERE {where_sql}
-            AND datetime
-            BETWEEN :date_from_adj::timestamptz
-            AND :date_to_adj::timestamptz
-            {paging_sql}
+    def where(self):
+        wheres = []
+        if self.lon and self.lat:
+            wheres.append(
+                " st_dwithin(st_makepoint(:lon, :lat)::geography,"
+                " b.geog, :radius) "
             )
-            SELECT row_to_json(t) as json FROM t;
+        for f, v in self:
+            if v is not None:
+                if f == "location" and all(isinstance(x, int) for x in v):
+                    wheres.append(" sensor_nodes_id = ANY(:location) ")
+                elif f == "location":
+                    wheres.append(" site_name = ANY(:location) ")
+                elif f == "parameter":
+                    wheres.append(" measurand = ANY(:measurand) ")
+                elif f == "unit":
+                    wheres.append(" units = ANY(:unit) ")
+                elif f == "is_mobile":
+                    wheres.append(" ismobile = :is_mobile ")
+
+                elif f in ["country", "city"]:
+                    wheres.append(f"{f} = ANY(:{f})")
+        wheres = list(filter(None, wheres))
+        if len(wheres) > 0:
+            return (" AND ").join(wheres)
+        return " TRUE "
+
+
+@router.get("/v1/measurements", response_model=OpenAQResult)
+@router.get("/v2/measurements", response_model=OpenAQResult)
+async def measurements_get(
+    db: DB = Depends(),
+    m: Measurements = Depends(Measurements.depends()),
+):
+    count = None
+    date_from = m.date_from
+    date_to = m.date_to
+
+    rolluptype = "node"
+    joins = """
+        LEFT JOIN rollups.groups_sensors USING (groups_id)
+        LEFT JOIN rollups.measurements_fastapi_base b
+        ON (groups_sensors.sensors_id=b.sensors_id)
+    """
+    params = m.dict()
+    where = m.where()
+    if m.is_mobile is None:
+        if (
+            (m.location is None or len(m.location)) == 0
+            and is_mobile is None
+            and m.coordinates is None
+        ):
+            joins = ""
+            if m.country is None or len(m.country) == 0:
+                rolluptype = "total"
+            else:
+                rolluptype = "country"
+                params = {"country": m.country}
+                where = " name =ANY(:country) "
+    # get overall summary numbers
+    q = f"""
+        SELECT
+            sum(value_count),
+            min(first_datetime),
+            max(last_datetime)
+        FROM rollups.rollups
+        LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+        {joins}
+        WHERE rollup = 'month' and type='{rolluptype}'
+            AND
+            st >= :date_from::timestamptz
+            AND
+            st < :date_to::timestamptz
+            AND
+            {where}
         """
+    rows = await db.fetch(q, params)
+    logger.debug(f"{rows}")
+    if rows is None:
+        return OpenAQResult()
+    try:
+        total_count = rows[0][0]
+        range_start = rows[0][1].replace(tzinfo=UTC)
+        range_end = rows[0][2].replace(tzinfo=UTC)
+    except Exception:
+        return OpenAQResult()
 
-        rows = await db.fetch(q, params)
-        logger.debug("Time to before rows loaded: %s", time.time() - start)
-        json_rows = [json.loads(r["json"]) for r in rows]
+    if date_from is None:
+        date_from = range_start
     else:
-        json_rows = []
+        date_from = max(date_from, range_start)
 
-    meta = {
-        "name": "openaq-api",
-        "license": "CC BY 4.0",
-        "website": "https://docs.openaq.org/",
-        "page": paging.page,
-        "limit": paging.limit,
-        "found": count,
-    }
+    if date_to is None:
+        date_to = range_end
+    else:
+        date_to = min(date_to, range_end, datetime.now().replace(tzinfo=UTC))
 
-    logger.debug("Total Time: %s", time.time() - start)
-    return {"meta": meta, "results": json_rows}
+    count = total_count
+    # if time is unbounded, we can just use the total count
+    if (date_from == range_start) and (date_to == range_end):
+        count = total_count
+
+    date_from_adj = date_from
+    date_to_adj = date_to
+
+    qparams = m.dict()
+    qparams["date_from_adj"] = date_from_adj
+    qparams["date_to_adj"] = date_to_adj
+
+    days = (date_to_adj - date_from_adj).total_seconds() / (24 * 60 * 60)
+    logger.debug(f" days {days}")
+
+    # if we are ordering by time, keep us from searching everything
+    # for paging
+    delta = timedelta(days=5)
+    if m.order_by == "datetime":
+        if m.sort == "asc":
+            date_to_adj = date_from_adj + delta
+        else:
+            date_from_adj = date_to_adj - delta
+
+    qparams["date_from_adj"] = date_from_adj
+    qparams["date_to_adj"] = date_to_adj
+
+    # count = total_count
+    results = []
+    if count > 0:
+        if m.sort == "asc":
+            rangestart = date_from
+            rangeend = min(date_from + delta, date_to)
+        else:
+            rangeend = date_to
+            rangestart = max(date_to - delta, date_from)
+
+        logger.debug(f"Entering loop {count} {rangestart} {rangeend}")
+        rc = 0
+        qparams["rangestart"] = rangestart
+        qparams["rangeend"] = rangeend
+        while rc < m.limit and rangestart >= date_from and rangeend <= date_to:
+            logger.debug(f"looping... {rc} {rangestart} {rangeend}")
+            q = f"""
+            WITH t AS (
+                SELECT
+                    sensors_id as location_id,
+                    site_name as location,
+                    measurand as parameter,
+                    value,
+                    datetime,
+                    timezone,
+                    COALESCE(a.geog, b.geog, NULL) as geog,
+                    units as unit,
+                    country,
+                    city,
+                    ismobile
+                FROM rollups.measurements_fastapi_base b
+                LEFT JOIN measurements_all a USING (sensors_id)
+                WHERE {m.where()}
+                AND datetime
+                BETWEEN :rangestart::timestamptz
+                AND :rangeend::timestamptz
+                ORDER BY "{m.order_by}" {m.sort}
+                OFFSET :offset
+                LIMIT :limit
+                ), t1 AS (
+                    SELECT
+                        location_id,
+                        location,
+                        parameter,
+                        json_build_object(
+                                    'utc', format_timestamp(datetime, 'UTC'),
+                                    'local', format_timestamp(datetime, timezone)
+                                ) as date,
+                        unit,
+                        json_build_object(
+                                'latitude', st_y(geog::geometry),
+                                'longitude', st_x(geog::geometry)
+                            ) as coordinates,
+                        country,
+                        city,
+                        ismobile as "isMobile"
+                    FROM t
+                )
+                SELECT {count}::bigint as count, row_to_json(t1) as json FROM t1;
+            """
+
+            rows = await db.fetch(q, qparams)
+            if rows:
+                logger.debug(f"{len(rows)} rows found")
+                rc = rc + len(rows)
+                if len(rows) > 0 and rows[0][1] is not None:
+                    results.append(
+                        [
+                            json.loads(r[1])
+                            for r in rows
+                            if isinstance(r[1], str)
+                        ]
+                    )
+            logger.debug(
+                f"ran query... {rc} {rangestart} {date_from_adj}{rangeend} {date_to_adj}"
+            )
+            if m.sort == "desc":
+                rangestart -= delta
+                rangeend -= delta
+            else:
+                rangestart += delta
+                rangeend += delta
+            logger.debug(
+                f"stepped ranges... {rc} {rangestart} {date_from_adj}{rangeend} {date_to_adj}"
+            )
+            qparams["rangestart"] = rangestart
+            qparams["rangeend"] = rangeend
+    meta = Meta(
+        page=m.page,
+        limit=m.limit,
+        found=count,
+    )
+    output = OpenAQResult(meta=meta, results=results)
+
+    # output = await db.fetchOpenAQResult(q, m.dict())
+
+    return output

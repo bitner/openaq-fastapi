@@ -1,237 +1,218 @@
 import logging
-import time
-from typing import Optional
 
-import orjson as json
+from dateutil.tz import UTC
 from fastapi import APIRouter, Depends, Query
+from typing import Optional, List
+from .base import (
+    DB,
+    APIBase,
+    Country,
+    DateRange,
+    Measurands,
+    OpenAQResult,
+    Project,
+    Spatial,
+    Temporal,
+)
+from pydantic import root_validator
 
-from .base import DB, MeasurementFilters, MeasurementPaging, Spatial, Temporal
-
-logger = logging.getLogger("locations")
+logger = logging.getLogger("averages")
 logger.setLevel(logging.DEBUG)
 
 router = APIRouter()
 
 
-@router.get("/averages")
-async def locations_get(
+class Averages(APIBase, Country, Project, Measurands, DateRange):
+    spatial: Spatial = Query(...)
+    temporal: Temporal = Query(...)
+    location: Optional[List[str]] = None
+
+    def where(self):
+        wheres = []
+        if self.spatial == "country" and self.country is not None:
+            wheres.append("name = ANY(:country)")
+        if self.spatial == "project" and self.project is not None:
+            if all(isinstance(x, int) for x in self.project):
+                wheres.append("groups_id = ANY(:project)")
+            else:
+                wheres.append("name = ANY(:project)")
+        if self.spatial == "location" and self.location is not None:
+            wheres.append("name = ANY(:location)")
+        for f, v in self:
+            if v is not None and f in ["measurand", "units"]:
+                wheres.append(f"{f} = ANY(:{f})")
+        if len(wheres) > 0:
+            return (" AND ").join(wheres)
+        return " TRUE "
+
+    @root_validator
+    def validate_date_range(cls, values):
+        date_from = values.get("date_from")
+        date_to = values.get("date_to")
+        temporal = values.get("temporal")
+
+        if (
+            temporal in ["hour", "hod"]
+            and (date_to - date_from).total_seconds() > 31 * 24 * 60 * 60
+        ):
+            raise ValueError(
+                "Date range cannot excede 1 month for hourly queries"
+            )
+        return values
+
+
+@router.get("/v1/averages", response_model=OpenAQResult)
+@router.get("/v2/averages", response_model=OpenAQResult)
+async def averages_v2_get(
     db: DB = Depends(),
-    paging: MeasurementPaging = Depends(),
-    filters: MeasurementFilters = Depends(),
-    spatial: Optional[Spatial] = Query("country"),
-    temporal: Optional[Temporal] = Query("year"),
+    av: Averages = Depends(Averages.depends()),
 ):
-    start = time.time()
-    paging_q = await paging.sql()
-    where_q = await filters.sql()
-    date_from = paging.date_from
-    date_to = paging.date_to
-    date_from_adj = paging.date_from_adj
-    date_to_adj = paging.date_to_adj
+    date_from = av.date_from
+    date_to = av.date_to
+    initwhere = av.where()
+    qparams = av.dict(exclude_unset=True)
 
-    params = {}
-    params.update(paging_q["params"])
-    params.update(where_q["params"])
+    if qparams["spatial"] == "project":
+        qparams["spatial"] = "source"
+    elif qparams["spatial"] == "location":
+        qparams["spatial"] = "node"
 
-    params.update( {
-        "date_to": date_to,
-        "date_from": date_from,
-        "date_to_adj": date_to_adj,
-        "date_from_adj": date_from_adj,
-    })
-
-    where_sql = where_q["q"]
-    paging_sql = paging_q["q"]
-
-    if spatial == 'project':
-       spatial='source_name'
-
-
-
-    temporal_col = temporal_q = temporal_order = f"{temporal}::date"
-    if temporal == "day":
-        table = 'sensors_daily'
-    elif temporal == "month":
-        table = 'sensors_monthly'
-    elif temporal == "year":
-        table = 'sensors_yearly'
-    elif temporal == "moy":
-        table = 'sensors_monthly'
-        temporal_order = "to_char(month, 'MM')"
-        temporal_col = "to_char(month, 'Mon')"
-        temporal_q = "month"
-    elif temporal == "dow":
-        table = 'sensors_daily'
-        temporal_col = "to_char(day, 'Dy')"
-        temporal_order = "to_char(day, 'ID')"
-        temporal_q = "day"
-
-    else:
-        raise Exception
-
-
-    base_obj = [
-        "'parameter'", "measurand",
-        f"'{temporal}'", "d",
-        "'measurement_count'", "measurement_count",
-        "'average'", "average",
-        "'unit'", "units"
-    ]
-    cols=[]
-    if spatial in ['country', 'city', 'location']:
-        base_obj.extend([
-            "'country'", "country"
-        ])
-        cols.append('country')
-
-    if spatial == 'source_name':
-        base_obj.extend([
-            "'source_name'", "source_name"
-        ])
-        cols.append('source_name')
-
-    if spatial in ['city', 'location']:
-        base_obj.extend([
-            "'city'", "city"
-        ])
-        cols.append('city')
-
-    if spatial == 'location':
-        spatial = "site_name"
-        cols.append(["site_name", "lat", "lon"])
-        base_obj.extend([
-            "'location'", "site_name",
-            "'coordinates'",
-            "json_build_object('longitude', lon,'latitude', lat)"
-        ])
-    logger.debug(f"base_obj: {base_obj}")
-    logger.debug(f"cols: {cols}")
-    base = ','.join(base_obj)
-    spatial_sql = ','.join(cols)
-
-    final_query = f"""
+    q = f"""
         SELECT
-            total,
-            json_build_object({base}) as json
-        FROM t
+            min(st),
+            max(et)
+        FROM rollups.rollups
+        LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+        WHERE
+            rollup = 'total'
+            AND
+            type = :spatial::text
+            AND
+            {initwhere}
+        """
+
+    rows = await db.fetch(q, qparams)
+    if rows is None:
+        return OpenAQResult()
+    try:
+        range_start = rows[0][0].replace(tzinfo=UTC)
+        range_end = rows[0][1].replace(tzinfo=UTC)
+    except Exception:
+        return OpenAQResult()
+
+    if date_from is None:
+        qparams["date_from"] = range_start
+    else:
+        qparams["date_from"] = max(date_from, range_start)
+
+    if date_to is None:
+        qparams["date_to"] = range_end
+    else:
+        qparams["date_to"] = min(date_to, range_end)
+
+    temporal = av.temporal
+
+    # hourly data does not use any rollups
+    if av.temporal in ["hour", "hod"]:
+        # enforce limit of one month
+
+        if av.temporal == "hour":
+            temporal_col = "date_trunc('hour', datetime)"
+        else:
+            temporal_col = "extract('hour' from datetime)"
+
+        baseq = f"""
+            SELECT
+                measurand as parameter,
+                units as unit,
+                {temporal_col} as {av.temporal},
+                {temporal_col} as o,
+                {temporal_col} as st,
+                groups_id as id,
+                name,
+                subtitle,
+                count(*) as measurement_count,
+                round((sum(value)/count(*))::numeric, 4) as average
+            FROM measurements_all
+            LEFT JOIN sensors USING (sensors_id)
+            LEFT JOIN rollups.groups_sensors USING (sensors_id)
+            LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+            WHERE {initwhere}
+            AND
+                type = :spatial::text
+            AND datetime
+            BETWEEN :date_from::timestamptz
+            AND :date_to::timestamptz
+            GROUP BY 1,2,3,4,5,6,7,8
+
+            """
+    else:
+        temporal_order = "st"
+        temporal_col = "st::date"
+        group_clause = ""
+        agg_clause = """
+            value_count as measurement_count,
+            round((value_sum/value_count)::numeric, 4) as average
+        """
+
+        if av.temporal == "moy":
+            temporal = "month"
+            temporal_order = "to_char(st, 'MM')"
+            temporal_col = "to_char(st, 'Mon')"
+        elif av.temporal == "dow":
+            temporal = "day"
+            temporal_col = "to_char(st, 'Dy')"
+            temporal_order = "to_char(st, 'ID')"
+
+        if av.temporal in ["dow", "moy"]:
+            group_clause = " GROUP BY 1,2,3,4,5,6,7,8 "
+            agg_clause = """
+                sum(value_count) as measurement_count,
+                round((sum(value_sum)/sum(value_count))::numeric, 4) as average
+            """
+
+        where = f"""
+            WHERE
+                    rollup = :temporal::text
+                    AND
+                    type = :spatial::text
+                    AND
+                    st >= :date_from
+                    AND
+                    st < :date_to
+                    AND
+                    {initwhere}
+        """
+
+        baseq = f"""
+            SELECT
+                measurand as parameter,
+                units as unit,
+                {temporal_col} as {av.temporal},
+                {temporal_order} as o,
+                st,
+                groups_id as id,
+                name,
+                subtitle,
+                {agg_clause}
+            FROM rollups.rollups
+            LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+            {where}
+            {group_clause}
         """
 
     q = f"""
         WITH base AS (
-            SELECT
-                {temporal_col} as d,
-                {temporal_order} as o,
-                measurand,
-                units,
-                {spatial_sql},
-                value_count,
-                value_sum
-            FROM
-                measurements_web_base b
-                LEFT JOIN {table} t USING (sensors_id)
-            WHERE
-                {temporal_q} >= :date_from::timestamptz
-                AND
-                {temporal_q} <= :date_to::timestamptz
-                AND
-                {where_sql}
-        ), t as (
-        SELECT
-            d,
-            o,
-            measurand,
-            units,
-            {spatial_sql},
-            count(*) over () as total,
-            sum(value_count) as measurement_count,
-            sum(value_sum) / sum(value_count) as average
-        FROM base
-        GROUP BY
-            d,
-            o,
-            measurand,
-            units,
-            {spatial_sql}
-        ORDER BY {spatial} ASC, measurand, o ASC NULLS LAST
-        LIMIT :limit
-        OFFSET :offset
+            {baseq}
         )
-        {final_query}
+        SELECT count(*) over () as count, to_jsonb(base)-'{{o,st}}'::text[]
+        FROM base
+        ORDER BY o DESC
+        OFFSET :offset
+        LIMIT :limit;
         """
+    av.temporal = temporal
+    qparams["temporal"] = temporal
+    output = await db.fetchOpenAQResult(q, qparams)
 
-    if (temporal in ['day','dow'] and spatial in  ["country", "source_name"]):
-        if spatial == "country":
-            spatial_filter = filters.country[0]
-            table='countries_daily'
-        elif spatial == "source_name":
-            spatial_filter = filters.project[0]
-            table='sources_daily'
-        params.update({
-            "spatial": spatial_filter,
-            "measurand": filters.measurand[0].value,
-        })
-        q = f"""
-            WITH base AS (
-                SELECT
-                    {temporal_col} as d,
-                    {temporal_order} as o,
-                    _measurand as measurand,
-                    _units as units,
-                    {spatial_sql},
-                    value_count,
-                    value_sum
-                FROM
-                    {table}
-                WHERE
-                    {spatial}=:spatial
-                    AND
-                    _measurand=:measurand
-                    AND
-                    {temporal_q} >= :date_from::timestamptz
-                    AND
-                    {temporal_q} <= :date_to::timestamptz
-            ), t as (
-            SELECT
-                d,
-                o,
-                measurand,
-                units,
-                {spatial_sql},
-                count(*) over () as total,
-                sum(value_count) as measurement_count,
-                sum(value_sum) / sum(value_count) as average
-            FROM base
-            GROUP BY
-                d,
-                o,
-                measurand,
-                units,
-                {spatial_sql}
-            ORDER BY {spatial} ASC, measurand, o ASC NULLS LAST
-            LIMIT :limit
-            OFFSET :offset
-            )
-            {final_query}
-            """
-
-    rows = await db.fetch(q, params)
-
-
-    if len(rows) > 0:
-        total = rows[0][0]
-        json_rows = [json.loads(r["json"]) for r in rows]
-    else:
-        total = 0
-        json_rows = []
-
-    meta = {
-        "name": "openaq-api",
-        "license": "CC BY 4.0",
-        "website": "https://docs.openaq.org/",
-        "page": paging.page,
-        "limit": paging.limit,
-        "found": total,
-    }
-
-    logger.debug("Total Time: %s", time.time() - start)
-    return {"meta": meta, "results": json_rows}
+    return output

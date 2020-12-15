@@ -1,11 +1,23 @@
 import logging
-import time
-from typing import Optional
+from typing import List
 
-import orjson as json
 from fastapi import APIRouter, Depends, Query
-
-from .base import DB, Filters, Paging, Spatial, Temporal
+from pydantic.typing import Literal, Optional
+import jq
+from .base import (
+    DB,
+    APIBase,
+    City,
+    Country,
+    Geo,
+    HasGeo,
+    Location,
+    Measurands,
+    OpenAQResult,
+    Project,
+    SourceName,
+    Sort
+)
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -13,175 +25,140 @@ logger.setLevel(logging.DEBUG)
 router = APIRouter()
 
 
-@router.get("/cities")
+class Cities(City, Country, APIBase):
+    order_by: Literal[
+        "city", "country", "firstUpdated", "lastUpdated"
+    ] = Query("city")
+
+
+@router.get("/v1/cities", response_model=OpenAQResult)
+@router.get("/v2/cities", response_model=OpenAQResult)
 async def cities_get(
-    db: DB = Depends(),
-    paging: Paging = Depends(),
-    filters: Filters = Depends()
+    db: DB = Depends(), cities: Cities = Depends(Cities.depends())
 ):
-        paging_q = await paging.sql()
-        where_q = await filters.sql()
-        params = {}
-        params.update(paging_q["params"])
-        params.update(where_q["params"])
-
-        where_sql = where_q["q"]
-        paging_sql = paging_q["q"]
-
-        q = f"""
-        WITH t AS (
-        SELECT
-            country,
-            city,
-            sum(value_count) as count,
-            count(*) as locations,
-            to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-            to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-            array_agg(DISTINCT measurand) as parameters
-        FROM sensors_total
-        LEFT JOIN sensors_first_last USING (sensors_id)
-        LEFT JOIN sensors USING (sensors_id)
-        LEFT JOIN sensor_systems USING (sensor_systems_id)
-        LEFT JOIN sensor_nodes USING (sensor_nodes_id)
-        LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
-        LEFT JOIN measurands USING (measurands_id)
-        WHERE
-        {where_sql}
-        GROUP BY
+    q = f"""
+    WITH t AS (
+    SELECT
         country,
-        city
-        ORDER BY country, city
+        city,
+        sum(value_count) as count,
+        count(*) as locations,
+        to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
+        to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
+        array_agg(DISTINCT measurand) as parameters
+    FROM sensors_total
+    LEFT JOIN sensors_first_last USING (sensors_id)
+    LEFT JOIN sensors USING (sensors_id)
+    LEFT JOIN sensor_systems USING (sensor_systems_id)
+    LEFT JOIN sensor_nodes USING (sensor_nodes_id)
+    LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
+    LEFT JOIN measurands USING (measurands_id)
+    WHERE
+    {cities.where()}
+    GROUP BY
+    country,
+    city
+    ORDER BY "{cities.order_by}" {cities.sort}
+    OFFSET :offset
+    LIMIT :limit
+    )
+    SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
 
-        ), t1 as (
-        SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
-        )
-        {paging_sql}
+    """
 
-        """
+    output = await db.fetchOpenAQResult(q, cities.dict())
 
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/",
-            "page": paging.page,
-            "limit": paging.limit,
-            "found": None,
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        meta["found"] = rows[0]["count"]
-        json_rows = [json.loads(r[1]) for r in rows]
+    return output
 
-        return {"meta": meta, "results": json_rows}
 
-@router.get("/countries")
+class Countries(Country, APIBase):
+    order_by: Literal["country", "firstUpdated", "lastUpdated"] = Query(
+        "country"
+    )
+
+
+@router.get("/v1/countries", response_model=OpenAQResult)
+@router.get("/v2/countries", response_model=OpenAQResult)
 async def countries_get(
     db: DB = Depends(),
-    paging: Paging = Depends(),
-    filters: Filters = Depends()
+    countries: Countries = Depends(Countries.depends()),
 ):
-        paging_q = await paging.sql()
-        where_q = await filters.sql()
-        params = {}
-        params.update(paging_q["params"])
-        params.update(where_q["params"])
 
-        where_sql = where_q["q"]
-        paging_sql = paging_q["q"]
+    q = f"""
+    WITH t AS (
+    SELECT
+        country as code,
+        name,
+        sum(value_count) as count,
+        count(*) as locations,
+        to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
+        to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
+        array_agg(DISTINCT measurand) as parameters
+    FROM sensors_total
+    LEFT JOIN sensors_first_last USING (sensors_id)
+    LEFT JOIN sensors USING (sensors_id)
+    LEFT JOIN sensor_systems USING (sensor_systems_id)
+    LEFT JOIN sensor_nodes USING (sensor_nodes_id)
+    LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
+    LEFT JOIN measurands USING (measurands_id)
+    LEFT JOIN countries ON (country=iso_a2)
+    WHERE
+    {countries.where()}
+    GROUP BY
+    1,2
+    ORDER BY "{countries.order_by}" {countries.sort}
+    OFFSET :offset
+    LIMIT :limit
+    )
+    SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
 
-        q = f"""
-        WITH t AS (
-        SELECT
-            country as code,
-            name,
-            sum(value_count) as count,
-            count(*) as locations,
-            to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-            to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-            array_agg(DISTINCT measurand) as parameters
-        FROM sensors_total
-        LEFT JOIN sensors_first_last USING (sensors_id)
-        LEFT JOIN sensors USING (sensors_id)
-        LEFT JOIN sensor_systems USING (sensor_systems_id)
-        LEFT JOIN sensor_nodes USING (sensor_nodes_id)
-        LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
-        LEFT JOIN measurands USING (measurands_id)
-        LEFT JOIN countries ON (country=iso_a2)
-        WHERE
-        {where_sql}
-        GROUP BY
-        country,
-        name
-        ORDER BY country
+    """
 
-        ), t1 AS
-        (
-        SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
-        ) SELECT * FROM t1
-        {paging_sql}
+    output = await db.fetchOpenAQResult(q, countries.dict())
 
-        """
+    return output
 
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/",
-            "page": paging.page,
-            "limit": paging.limit,
-            "found": None,
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        meta["found"] = rows[0]["count"]
-        json_rows = [json.loads(r[1]) for r in rows]
 
-        return {"meta": meta, "results": json_rows}
+class Sources(SourceName, APIBase):
+    order_by: Literal["sourceName", "firstUpdated", "lastUpdated"] = Query(
+        "sourceName"
+    )
 
-@router.get("/sources")
+
+@router.get("/v1/sources", response_model=OpenAQResult)
+@router.get("/v2/sources", response_model=OpenAQResult)
 async def sources_get(
     db: DB = Depends(),
-    paging: Paging = Depends(),
-    filters: Filters = Depends()
+    sources: Sources = Depends(Sources.depends()),
 ):
-        paging_q = await paging.sql()
-        where_q = await filters.sql()
-        params = {}
-        params.update(paging_q["params"])
-        params.update(where_q["params"])
 
-        where_sql = where_q["q"]
-        paging_sql = paging_q["q"]
-
-        q = f"""
-        WITH t AS (
-        SELECT
-            source_name,
-            first(data)::jsonb as data,
-            sum(value_count) as count,
-            count(*) as locations,
-            to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-            to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-            array_agg(DISTINCT measurand) as parameters
-        FROM sources
-        LEFT JOIN sensor_nodes USING (source_name)
-        LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
-        LEFT JOIN sensor_systems USING (sensor_nodes_id)
-        LEFT JOIN sensors USING (sensor_systems_id)
-        LEFT JOIN sensors_total USING (sensors_id)
-        LEFT JOIN sensors_first_last USING (sensors_id)
-        LEFT JOIN measurands USING (measurands_id)
-
-        WHERE
-        {where_sql}
-        GROUP BY
-        1
-
-        ), t1 AS (
-        SELECT count(*) OVER () as count,
+    q = f"""
+    WITH t AS (
+    SELECT
+        source_name as "sourceName",
+        data::jsonb as data,
+        sum(value_count) as count,
+        count(*) as locations,
+        to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
+        to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
+        array_agg(DISTINCT measurand) as parameters
+    FROM sources
+    LEFT JOIN sensor_nodes USING (source_name)
+    LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
+    LEFT JOIN sensor_systems USING (sensor_nodes_id)
+    LEFT JOIN sensors USING (sensor_systems_id)
+    LEFT JOIN sensors_total USING (sensors_id)
+    LEFT JOIN sensors_first_last USING (sensors_id)
+    LEFT JOIN measurands USING (measurands_id)
+    WHERE
+    {sources.where()}
+    GROUP BY
+    1,2
+    ORDER BY "{sources.order_by}" {sources.sort}
+    OFFSET :offset
+    LIMIT :limit
+    )
+    SELECT count(*) OVER () as count,
         (coalesce(data, '{{}}'::jsonb) || jsonb_build_object(
             'count', count,
             'locations', locations,
@@ -189,300 +166,275 @@ async def sources_get(
             'lastUpdated', "lastUpdated",
             'parameters', parameters
             )) as json FROM t
-        ) select * from t1
-        {paging_sql}
 
-        """
+    """
 
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/",
-            "page": paging.page,
-            "limit": paging.limit,
-            "found": None,
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        meta["found"] = rows[0]["count"]
-        logger.debug(f'{rows}')
-        json_rows = [json.loads(r[1]) for r in rows]
+    output = await db.fetchOpenAQResult(q, sources.dict())
 
-        return {"meta": meta, "results": json_rows}
+    return output
 
 
-@router.get("/parameters")
+class Parameters(SourceName, APIBase):
+    order_by: Literal["id", "name", "preferredUnit"] = Query("id")
+
+
+@router.get("/v1/parameters", response_model=OpenAQResult)
+@router.get("/v2/parameters", response_model=OpenAQResult)
 async def parameters_get(
     db: DB = Depends(),
-    paging: Paging = Depends(),
-    filters: Filters = Depends()
+    parameters: Parameters = Depends(Parameters.depends()),
 ):
-        paging_q = await paging.sql()
-        where_q = await filters.sql()
-        params = {}
-        params.update(paging_q["params"])
-        params.update(where_q["params"])
 
-        where_sql = where_q["q"]
-        paging_sql = paging_q["q"]
+    q = f"""
+    WITH t AS (
+    SELECT
+        measurands_id as id,
+        upper(measurand) as name,
+        upper(measurand) as description,
+        units as "preferredUnit"
+    FROM measurands
+    ORDER BY "{parameters.order_by}" {parameters.sort}
+    )
+    SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
+    LIMIT :limit
+    OFFSET :offset
+    """
 
-        q = f"""
-        WITH t AS (
-        SELECT
-            measurand as id,
-            upper(measurand) as name,
-            upper(measurand) as description,
-            units as "preferredUnit"
-        FROM measurands
+    output = await db.fetchOpenAQResult(q, parameters.dict())
+
+    return output
+
+
+class Projects(Project, APIBase):
+    order_by: Literal[
+        "id", "name", "subtitle", "firstUpdated", "lastUpdated"
+    ] = Query("id")
+
+    def where(self):
+        wheres = []
+        for f, v in self:
+            if v is not None:
+                logger.debug(f" setting where for {f} {v} ")
+                if f == "project" and all(isinstance(x, int) for x in v):
+                    logger.debug(" using int id")
+                    wheres.append(" groups_id = ANY(:project) ")
+                elif f == "project":
+                    wheres.append(" name = ANY(:project) ")
+                elif isinstance(v, List):
+                    wheres.append(f"{f} = ANY(:{f})")
+        if len(wheres) > 0:
+            return (" AND ").join(wheres)
+        return " TRUE "
+
+
+@router.get("/v2/projects/{project_id}", response_model=OpenAQResult)
+@router.get("/v2/projects", response_model=OpenAQResult)
+async def projects_get(
+    db: DB = Depends(),
+    projects: Projects = Depends(Projects.depends()),
+):
+
+    q = f"""
+        WITH bysensor AS (
+            SELECT
+                groups_id as "id",
+                name,
+                subtitle,
+                geog,
+                value_count as count,
+                value_sum / value_count as average,
+                locations,
+                measurand,
+                units as unit,
+                sources,
+                last(last_value, last_datetime) as "lastValue",
+                max(last_datetime) as "lastUpdated",
+                min(first_datetime) as "firstUpdated"
+            FROM
+                rollups.rollups LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+            WHERE
+                type='source' AND rollup='total'
+                AND {projects.where()}
+            GROUP BY 1,2,3,4,5,6,7,8,9,10
+            ORDER BY "{projects.order_by}" {projects.sort}
+
         )
-        SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
+        , overall as (
+        SELECT
+            "id",
+            name,
+            subtitle,
+            (st_asgeojson(geog)::jsonb)->'coordinates' as coordinates,
+            sources,
+            sum(count) as measurements,
+            max(locations) as locations,
+            jsonb_agg(to_jsonb(bysensor) - '{{id,name,subtitle,geog,sources}}'::text[]) as parameters
+            FROM bysensor
+            GROUP BY 1,2,3,4,5
+        )
+        select count(*) OVER () as count, to_jsonb(overall) as json from overall
         LIMIT :limit
         OFFSET :offset
-        """
-
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/",
-            "page": paging.page,
-            "limit": paging.limit,
-            "found": None,
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        meta["found"] = rows[0]["count"]
-        json_rows = [json.loads(r[1]) for r in rows]
-
-        return {"meta": meta, "results": json_rows}
+            ;
+    """
 
 
-@router.get("/projects")
-async def projects_get(
-    db: DB = Depends(),
-    paging: Paging = Depends(),
-    filters: Filters = Depends()
-):
-        paging_q = await paging.sql()
-        where_q = await filters.sql()
-        params = {}
-        params.update(paging_q["params"])
-        params.update(where_q["params"])
+    output = await db.fetchOpenAQResult(q, projects.dict())
 
-        where_sql = where_q["q"]
-        paging_sql = paging_q["q"]
-
-        q = f"""
-        WITH t AS (
-        SELECT
-            source_name as "projectId",
-            source_name as "projectName",
-            coalesce(sources.data->>'name', n.metadata->>'sensor_node_source_fullname') as subtitle,
-            sum(value_count) as count,
-            to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-            to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-            count(*) as locations,
-            array_agg(DISTINCT measurand) as parameters
-        FROM sensors_total
-        LEFT JOIN sensors_first_last USING (sensors_id)
-        LEFT JOIN sensors USING (sensors_id)
-        LEFT JOIN sensor_systems USING (sensor_systems_id)
-        LEFT JOIN sensor_nodes n USING (sensor_nodes_id)
-        LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
-        LEFT JOIN measurands USING (measurands_id)
-        LEFT JOIN sources USING(source_name)
-        WHERE
-        n.metadata->>'origin'='AQDC' AND
-        {where_sql}
-        GROUP BY
-        source_name,
-        sources.data->>'name',
-        n.metadata->>'sensor_node_source_fullname'
-        ORDER BY source_name
-
-        ), t1 AS
-        (
-        SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
-        ) SELECT * FROM t1
-        {paging_sql}
-
-        """
-
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/",
-            "page": paging.page,
-            "limit": paging.limit,
-            "found": None,
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        meta["found"] = rows[0]["count"]
-        json_rows = [json.loads(r[1]) for r in rows]
-
-        return {"meta": meta, "results": json_rows}
+    return output
 
 
-@router.get("/projects/{project_id}")
-async def projects_get(
-    project_id: str,
-    db: DB = Depends(),
-):
+class Locations(Location, City, Country, Geo, Measurands, HasGeo, APIBase):
+    order_by: Literal[
+        "city",
+        "country",
+        "location",
+        "sourceName",
+        "firstUpdated",
+        "lastUpdated",
+    ] = Query("lastUpdated")
+    sort: Optional[Sort] = Query("desc")
+    isMobile: Optional[bool] = None
 
-        params = {'project_id':project_id}
-        q = """
-        WITH base AS (
-            SELECT *,
-            n.geom as sgeom,
-            coalesce(sources.data->>'name', n.metadata->>'sensor_node_source_fullname') as subtitle
-            FROM
-            sensors_total
-            LEFT JOIN sensors_first_last USING (sensors_id)
-            LEFT JOIN sensors USING (sensors_id)
-            LEFT JOIN sensor_systems USING (sensor_systems_id)
-            LEFT JOIN sensor_nodes n USING (sensor_nodes_id)
-            LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
-            LEFT JOIN measurands USING (measurands_id)
-            LEFT JOIN sources USING (source_name)
-            WHERE
-            source_name=:project_id
-        ),
-        overall AS (
-        SELECT
-            source_name as "id",
-            source_name as "name",
-            subtitle,
-            sum(value_count) as measurements,
-            count(*) as locations,
-            to_jsonb(st_collect(distinct sgeom)) as points,
-            to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-            to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated"
-        FROM base
-        group by 1,2,3
-        ),
-        byparameter AS (
-            SELECT
-                measurand,
-                units as unit,
-                sum(value_count) as count,
-                sum(value_sum) / sum(value_count) as average,
-                to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-                to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-                last(last_value, last_datetime) as lastValue,
-                count(*) as locations
-            FROM
-            base
-            GROUP BY measurand, units
-        ),
-        sources AS (
-            SELECT jsonb_agg(data) as sources FROM sources WHERE source_name IN (SELECT distinct source_name FROM base)
-        ), t1 AS
-        (
-        SELECT
-            overall.*,
-            jsonb_agg(to_jsonb(byparameter)) as parameters,
-            sources
-        FROM overall, byparameter, sources
-        GROUP BY 1,2,3,4,5,6,7,8, sources
-        ) SELECT to_jsonb(t1) as json FROM t1 group by t1
+    def where(self):
+        wheres = []
 
-        """
+        for f, v in self:
+            if v is not None:
+                if f == "project":
+                    if all(isinstance(x, int) for x in self.project):
+                        wheres.append("groups_id = ANY(:project)")
+                    else:
+                        wheres.append("name = ANY(:project)")
+                elif f == "location" and all(isinstance(x, int) for x in v):
+                    wheres.append(" id = ANY(:location) ")
+                elif f == "location":
+                    wheres.append(" name = ANY(:location) ")
+                elif f == "parameter":
+                    wheres.append("""
+                        parameters @> ANY(jsonb_array_query('measurand',:parameter::text[]))
+                        """
+                    )
+                elif f == "isMobile":
+                    wheres.append(' "isMobile" ')
+                # elif isinstance(v, List):
+                #     wheres.append(f"{f} = ANY(:{f})")
+        if len(wheres) > 0:
+            return (" AND ").join(wheres)
+        return " TRUE "
 
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/"
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        # meta["found"] = rows[0]["count"]
-        json_rows = [json.loads(r['json']) for r in rows]
 
-        return {"meta": meta, "results": json_rows}
-
-@router.get("/locations/{location_id}")
+@router.get("/v2/locations/{location_id}", response_model=OpenAQResult)
+@router.get("/v2/locations", response_model=OpenAQResult)
 async def locations_get(
-    location_id: int,
     db: DB = Depends(),
+    locations: Locations = Depends(Locations.depends()),
 ):
 
-        params = {'location_id':location_id}
-        q = """
-        WITH base AS (
-            SELECT *, sensor_nodes.geom as sgeom
-            FROM
-            sensors_total
-            LEFT JOIN sensors_first_last USING (sensors_id)
-            LEFT JOIN sensors USING (sensors_id)
-            LEFT JOIN sensor_systems USING (sensor_systems_id)
-            LEFT JOIN sensor_nodes USING (sensor_nodes_id)
-            LEFT JOIN sensor_nodes_json USING (sensor_nodes_id)
-            LEFT JOIN measurands USING (measurands_id)
+    q = f"""
+        WITH t1 AS (
+            SELECT *
+            FROM locations_base_v2
             WHERE
-            sensor_nodes_id=:location_id
+            {locations.where()}
+            ORDER BY "{locations.order_by}" {locations.sort}
         ),
-        overall AS (
-        SELECT
-            sensor_systems_id as "id",
-            site_name as "name",
-            city,
-            country,
-            jsonb_build_object(
-                'longitude', st_x(sgeom),
-                'latitude', st_y(sgeom)
-            ) as coordinates,
-            sum(value_count) as measurements,
-            to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-            to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated"
-        FROM base
-        group by id, name,city,country, 5
+        nodes AS (
+            SELECT count(distinct id) as nodes
+            FROM locations_base_v2
+            WHERE
+            {locations.where()}
         ),
-        byparameter AS (
-            SELECT
-                measurand,
-                units as unit,
-                sum(value_count) as count,
-                sum(value_sum) / sum(value_count) as average,
-                to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
-                to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
-                last(last_value, last_datetime) as "lastValue",
-                count(*) as locations
-            FROM
-            base
-            GROUP BY measurand, units
-        ),
-        sources AS (
-            SELECT jsonb_agg(data) as sources FROM sources WHERE source_name IN (SELECT distinct source_name FROM base)
-        ), t1 AS
-        (
-        SELECT
-            overall.*,
-            jsonb_agg(to_jsonb(byparameter)) as parameters,
-            sources
-        FROM overall, byparameter, sources
-        GROUP BY id, name,city,country, coordinates, overall."firstUpdated", overall."lastUpdated", 6 , sources
-        ) SELECT to_jsonb(t1) as json FROM t1 group by t1
-
+        t2 AS (
+        SELECT to_jsonb(t1) - '{{json,source_name,geog}}'::text[] as json
+        FROM t1 group by t1, json
+        )
+        SELECT nodes as count, json
+        FROM t2, nodes
+        LIMIT :limit
+        OFFSET :offset
+        ;
         """
 
-        meta = {
-            "name": "openaq-api",
-            "license": "CC BY 4.0",
-            "website": "https://docs.openaq.org/"
-        }
-        rows = await db.fetch(q, params)
-        if len(rows) == 0:
-            meta["found"] = 0
-            return {"meta": meta, "results": []}
-        # meta["found"] = rows[0]["count"]
-        json_rows = [json.loads(r['json']) for r in rows]
+    output = await db.fetchOpenAQResult(q, locations.dict())
 
-        return {"meta": meta, "results": json_rows}
+    return output
+
+
+@router.get("/v1/latest/{location_id}", response_model=OpenAQResult)
+@router.get("/v2/latest/{location_id}", response_model=OpenAQResult)
+@router.get("/v1/latest", response_model=OpenAQResult)
+@router.get("/v2/latest", response_model=OpenAQResult)
+async def latest_get(
+    db: DB = Depends(),
+    locations: Locations = Depends(Locations.depends()),
+):
+    data = await locations_get(db, locations)
+    meta = data.meta
+    res = data.results
+    if len(res) == 0:
+        return data
+
+    latest_jq = jq.compile(
+        """
+        .[] |
+            {
+                location: .name,
+                city: .city,
+                country: .country,
+                coordinates: .coordinates,
+                measurements: [
+                    .parameters[] | {
+                        parameter: .measurand,
+                        value: .lastValue,
+                        lastUpdated: .lastUpdated,
+                        unit: .unit
+                    }
+                ]
+            }
+
+        """
+    )
+
+    ret = latest_jq.input(res).all()
+    return OpenAQResult(meta=meta, results=ret)
+
+
+@router.get("/v1/locations/{location_id}", response_model=OpenAQResult)
+@router.get("/v1/locations", response_model=OpenAQResult)
+async def locationsv1_get(
+    db: DB = Depends(),
+    locations: Locations = Depends(Locations.depends()),
+):
+    data = await locations_get(db, locations)
+    meta = data.meta
+    res = data.results
+
+    latest_jq = jq.compile(
+        """
+        .[] |
+            {
+                id: .id,
+                country: .country,
+                city: .city,
+                location: .name,
+                soureName: .source_name,
+                sourceType: .sources[0].name,
+                coordinates: .coordinates,
+                firstUpdated: .firstUpdated,
+                lastUpdated: .lastUpdated,
+                parameters : [ .parameters[].measurand ],
+                countsByMeasurement: [
+                    .parameters[] | {
+                        parameter: .measurand,
+                        count: .count
+                    }
+                ],
+                count: .parameters| map(.count) | add
+            }
+
+        """
+    )
+
+    ret = latest_jq.input(res).all()
+    return OpenAQResult(meta=meta, results=ret)

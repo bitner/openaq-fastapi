@@ -1,50 +1,316 @@
+import inspect
 import logging
 import time
 from datetime import date, datetime, timedelta
 from enum import Enum
-from math import ceil
-from typing import List, Optional, Union
+from types import FunctionType
+from typing import Dict, List, Optional, Union
 
+import asyncpg
+import humps
 import orjson
 from aiocache import SimpleMemoryCache, cached
 from aiocache.plugins import HitMissRatioPlugin, TimingPlugin
-from buildpg import S, V, funcs, logic, render
-from fastapi import Depends, Query, Request
-from pydantic import BaseModel, validator
+from buildpg import render
+from dateutil.parser import parse
+from dateutil.tz import UTC
+from fastapi import Query, Request
+from pydantic import (
+    BaseModel,
+    Field,
+    confloat,
+    conint,
+    validator,
+    ValidationError,
+)
+from pydantic.typing import Any
+
+from ..settings import settings
 
 logger = logging.getLogger("base")
 logger.setLevel(logging.DEBUG)
 
+int4 = conint(ge=0, lt=2147483647)
 
-class Measurand(str, Enum):
-    pm25 = "pm25"
-    pm10 = "pm10"
-    so2 = "so2"
-    no2 = "no2"
-    o3 = "o3"
-    bc = "bc"
+maxint = 2147483647
+
+
+def parameter_dependency_from_model(name: str, model_cls):
+    """
+    Takes a pydantic model class as input and creates
+    a dependency with corresponding
+    Query parameter definitions that can be used for GET
+    requests.
+
+    This will only work, if the fields defined in the
+    input model can be turned into
+    suitable query parameters. Otherwise fastapi
+    will complain down the road.
+
+    Arguments:
+        name: Name for the dependency function.
+        model_cls: A ``BaseModel`` inheriting model class as input.
+    """
+    names = []
+    annotations: Dict[str, type] = {}
+    defaults = []
+    for field_model in model_cls.__fields__.values():
+        if field_model.name not in ["self"]:
+            field_info = field_model.field_info
+
+            names.append(field_model.name)
+            annotations[field_model.name] = field_model.outer_type_
+            defaults.append(
+                Query(field_model.default, description=field_info.description)
+            )
+
+    code = inspect.cleandoc(
+        """
+    def %s(%s):
+        return %s(%s)
+    """
+        % (
+            name,
+            ", ".join(names),
+            model_cls.__name__,
+            ", ".join(["%s=%s" % (name, name) for name in names]),
+        )
+    )
+
+    compiled = compile(code, "string", "exec")
+    env = {model_cls.__name__: model_cls}
+    env.update(**globals())
+    func = FunctionType(compiled.co_consts[0], env, name)
+    func.__annotations__ = annotations
+    func.__defaults__ = (*defaults,)
+
+    return func
+
+
+class OBaseModel(BaseModel):
+    class Config:
+        min_anystr_length = 1
+        validate_assignment = True
+        allow_population_by_field_name = True
+        alias_generator = humps.decamelize
+        anystr_strip_whitespace = True
+
+    """@validator("*", each_item=True)
+    def validate_no_empty_strings(cls, v):
+        if isinstance(v, str) and v == "":
+            return None
+        return v
+
+    @validator("*")
+    def validate_no_empty_lists(cls, v):
+        if isinstance(v, list):
+            v = list(filter(None, v))
+            if len(v) == 0:
+                return None
+            return v
+        return v"""
+
+    @classmethod
+    def depends(cls):
+        logger.debug(f"Depends {cls}")
+        return parameter_dependency_from_model("depends", cls)
+
+    """def wheres(self):
+        funcsnames, _ = getmembers(self, isfunction)
+        wherefuncs = [f for f in funcnames if"""
+
+
+class Meta(BaseModel):
+    name: str = "openaq-api"
+    license: str = "CC BY 4.0d"
+    website: str = f"{settings.OPENAQ_FASTAPI_URL}/docs"
+    page: int = 1
+    limit: int = 100
+    found: int = 0
+
+
+class OpenAQResult(BaseModel):
+    meta: Meta = Meta()
+    results: Optional[List[Any]] = []
+
+
+class City(OBaseModel):
+    city: Optional[List[str]] = Query(None)
+
+
+class Country(OBaseModel):
+    country: Optional[List[str]] = Query(
+        None, min_length=2, max_length=2, regex="[a-zA-Z][a-zA-Z]"
+    )
+
+    @validator("country", check_fields=False)
+    def validate_country(cls, v):
+        if v is not None:
+            return [str.upper(val) for val in v]
+        return None
+
+
+class SourceName(OBaseModel):
+    source_name: Optional[List[str]] = Query(
+        None, aliases=("source", "sourceName")
+    )
+
+
+def id_or_name_validator(name, v, values):
+    ret = None
+    logger.debug(f"validating {name} {v} {values}")
+    id = values.get(f"{name}_id", None)
+    if id is not None:
+        ret = [id]
+    elif v is not None:
+        ret = v
+    if isinstance(ret, list):
+        if all(isinstance(x, int) for x in ret):
+            logger.debug("everything is an int")
+            if min(ret) < 1 or max(ret) > maxint:
+                raise ValueError(
+                    name,
+                    f"{name}_id must be between 1 and {maxint}",
+                )
+    logger.debug(f"returning {ret}")
+    return ret
+
+
+class Project(OBaseModel):
+    project_id: Optional[int] = None
+    project: Optional[List[Union[int, str]]] = Query(None, gt=0, le=maxint)
+
+    @validator("project")
+    def validate_project(cls, v, values):
+        return id_or_name_validator("project", v, values)
+
+
+class Location(OBaseModel):
+    location_id: Optional[int] = None
+    location: Optional[List[Union[int, str]]] = None
+
+    @validator("location")
+    def validate_location(cls, v, values):
+        return id_or_name_validator("location", v, values)
+
+
+class HasGeo(OBaseModel):
+    has_geo: bool = None
+
+    def where(self):
+        if self.has_geo is not None:
+            if self.has_geo:
+                return " AND geog is not null "
+            if not self.has_geo:
+                return " AND geog is null "
+        return ""
+
+
+class Geo(OBaseModel):
+    coordinates: Optional[str] = Field(
+        None, regex=r"^-?\d{1,2}\.?\d{0,8},-?1?\d{1,2}\.?\d{0,8}$"
+    )
+    lat: Optional[confloat(ge=-90, le=90)] = None
+    lon: Optional[confloat(ge=-180, le=180)] = None
+    radius: conint(gt=0, le=100000) = 1000
+
+    @validator("lat")
+    def validate_lat(cls, v, values):
+        coordinates = values.get("coordinates", None)
+        if coordinates is not None:
+            try:
+                lat, _ = values.get("coordinates").split(",")
+                lat = float(lat)
+                if lat >= -90 and lat <= 90:
+                    return lat
+                else:
+                    raise ValueError("latitude is out of range")
+            except Exception as e:
+                raise ValueError(f"{e}")
+
+    @validator("lon")
+    def validate_lon(cls, v, values):
+        coordinates = values.get("coordinates", None)
+        if coordinates is not None:
+            try:
+                _, lon = values.get("coordinates").split(",")
+                lon = float(lon)
+                if lon >= -180 and lon <= 180:
+                    return lon
+                else:
+                    raise ValueError("longitude is out of range")
+            except Exception as e:
+                raise ValueError(f"{e}")
+
+    def where_geo(self):
+        if self.lat is not None and self.lon is not None:
+            return (
+                " st_dwithin(st_makepoint(:lon, :lat)::geography,"
+                " geom::geography, :radius) "
+            )
+        return None
+
+
+class Measurands(OBaseModel):
+    parameter: Optional[List[str]] = None
+    measurand: Optional[List[str]] = None
+    units: Optional[List[str]] = None
+
+    @validator("measurand", check_fields=False)
+    def check_measurand(cls, v, values):
+        if v is None:
+            return values.get("parameter")
+        return v
+
+    @validator("parameter", check_fields=False)
+    def check_parameter(cls, v, values):
+        if v is None:
+            return values.get("measurand")
+        return v
+
+
+class Paging(OBaseModel):
+    limit: int = Query(100, gt=0, le=10000)
+    page: int = Query(1, gt=0, le=6000)
+    offset: int = Query(0, ge=0, le=10000)
+
+    @validator("offset", check_fields=False)
+    def check_offset(cls, v, values, **kwargs):
+        offset = values["limit"] * (values["page"] - 1)
+        if offset + values["limit"] > 100000:
+            raise ValueError("offset + limit must be < 100000")
+        return offset
+
+
+# class Measurand(str, Enum):
+#     pm25 = "pm25"
+#     pm10 = "pm10"
+#     so2 = "so2"
+#     no2 = "no2"
+#     o3 = "o3"
+#     bc = "bc"
 
 
 class Sort(str, Enum):
     asc = "asc"
     desc = "desc"
-    ASC = "ASC"
-    DESC = "DESC"
 
 
-class Order(str, Enum):
-    city = "city"
-    country = "country"
-    location = "location"
-    count = "count"
-    datetime = "datetime"
-    locations = "locations"
-    firstUpdated = "firstUpdated"
-    lastUpdated = "lastUpdated"
+# class Order(str, Enum):
+#     city = "city"
+#     country = "country"
+#     location = "location"
+#     count = "count"
+#     datetime = "datetime"
+#     locations = "locations"
+#     firstUpdated = "firstUpdated"
+#     lastUpdated = "lastUpdated"
+#     name = "name"
+#     id = "id"
+#     measurements = "measurements"
 
 
 class Spatial(str, Enum):
-    city = "city"
     country = "country"
     location = "location"
     project = "project"
@@ -56,390 +322,75 @@ class Temporal(str, Enum):
     year = "year"
     moy = "moy"
     dow = "dow"
+    hour = "hour"
+    total = "total"
+    hod = "hod"
 
 
-class IncludeFields(str, Enum):
-    attribution = "attribution"
-    averagingPeriod = "averagingPeriod"
-    sourceName = "sourceName"
+# class IncludeFields(str, Enum):
+#     attribution = "attribution"
+#     averagingPeriod = "averagingPeriod"
+#     sourceName = "sourceName"
 
 
-class Coordinates(BaseModel):
-    lat: float = None
-    lon: float = None
+class APIBase(Paging):
+    sort: Optional[Sort] = Query("asc")
 
-    @validator("lat")
-    def lat_within_range(cls, v):
-        if not -90 <= v <= 90:
-            raise ValueError("Latitude outside allowed range")
-        return v
-
-    @validator("lon")
-    def lon_within_range(cls, v):
-        if not -180 <= v <= 180:
-            raise ValueError("Longitude outside allowed range")
-        return v
-
-
-class Paging:
-    def __init__(
-        self,
-        limit: Optional[int] = Query(100, gt=0, le=10000),
-        page: Optional[int] = Query(1, gt=0),
-        sort: Optional[Sort] = Query("desc"),
-        order_by: Optional[Order] = Query("lastUpdated"),
-    ):
-        self.limit = limit
-        self.page = page
-        self.sort = sort
-        self.order_by = order_by
-
-    async def sql(self):
-        order_by = self.order_by
-        sort = str.lower(self.sort)
-        if order_by in ['count', 'locations']:
-            q = '(json->>:order_by)::int'
-        elif order_by in ['firstUpdated', 'lastUpdated']:
-            q = '(json->>:order_by)::timestamptz'
-        else:
-            q = 'json->>:order_by'
-        if sort == "asc":
-            order = f" ORDER BY {q} ASC "
-        else:
-            order = f" ORDER BY {q} DESC NULLS LAST "
-        offset = (self.page - 1) * self.limit
-        return {
-            "q": f"{order} OFFSET :offset LIMIT :limit",
-            "params": {
-                "order_by": order_by,
-                "offset": offset,
-                "limit": self.limit,
-            },
-        }
-
-
-
-class MeasurementPaging:
-    def __init__(
-        self,
-        limit: Optional[int] = Query(100, gt=0, le=10000),
-        page: Optional[int] = Query(1, gt=0),
-        sort: Optional[Sort] = Query("desc"),
-        order_by: Optional[Order] = Query("datetime"),
-        date_from: Union[datetime, date, None] = date.fromisoformat(
-            "2013-01-01"
-        ),
-        date_to: Union[datetime, date, None] = datetime.utcnow(),
-    ):
-        self.limit = limit
-        self.page = page
-        self.sort = sort
-        self.order_by = order_by
-        df = datetime(
-            *date_from.timetuple()[:-6]
-        )
-        df -= timedelta(
-            minutes=df.minute % 15,
-            seconds=df.second,
-            microseconds=df.microsecond
-        )
-        dt = datetime(
-            *date_to.timetuple()[:-6]
-        )
-        dt -= timedelta(
-            minutes=dt.minute % 15,
-            seconds=dt.second,
-            microseconds=dt.microsecond
-        )
-        self.date_from = self.date_from_adj = df
-        self.date_to = self.date_to_adj = dt
-        self.offset = (self.page - 1) * self.limit
-        self.totalrows = self.limit + self.offset
-
-
-
-        logger.debug(
-            "%s %s %s", date_from, date_to, (self.offset + limit) / 1000
-        )
-        time_offset = timedelta(days=ceil((self.offset + limit) / 1000))
-        logger.debug(
-            "%s %s %s %s %s",
-            self.date_from,
-            self.date_to,
-            time_offset,
-            self.date_from_adj,
-            self.date_to_adj,
-        )
-
-        if sort == "desc":
-            self.date_from_adj = self.date_to - time_offset
-        else:
-            self.date_to_adj = self.date_from + time_offset
-
-    async def sql(self):
-        order_by = self.order_by
-        sort = self.sort
-        if sort == "asc":
-            order = f" ORDER BY {order_by} ASC "
-        else:
-            order = f" ORDER BY {order_by} DESC NULLS LAST "
-        offset = (self.page - 1) * self.limit
-        return {
-            "q": f"{order} OFFSET :offset LIMIT :limit",
-            "params": {
-                "order_by": order_by,
-                "offset": offset,
-                "limit": self.limit,
-            },
-        }
-
-
-class Geo:
-    def __init__(
-        self,
-        coordinates: Optional[str] = Query(
-            None, regex=r"^-?1?\d{1,2}\.?\d{0,8},-?\d{1,2}\.?\d{0,8}$"
-        ),
-        radius: Optional[int] = Query(1000, gt=0, le=100000),
-    ):
-        self.radius = radius
-        self.coordinates = None
-        if coordinates is not None:
-            lon, lat = str.split(coordinates, ",")
-            self.coordinates = Coordinates(lon=lon, lat=lat)
-            point = funcs.cast(
-                logic.Func("st_makepoint", lon, lat), "geography"
-            )
-            self.sql = logic.Func("st_dwithin", point, V("geog"), self.radius)
-        else:
-            self.sql = S(True)
-
-
-async def overlaps(field: str, param: str, val: List):
-    if val is not None:
-        q = orjson.dumps([{field: [v]} for v in val]).decode()
-        w = f"json @> ANY(jsonb_array(:{param}::jsonb))"
-        logger.debug("q: %s, w: %s", q, w)
-        return {"w": w, "q": q, "param": param}
-    return None
-
-
-async def isin(field: str, param: str, val: List):
-    if val is not None:
-        q = orjson.dumps([{field: v} for v in val]).decode()
-        w = f"json @> ANY(jsonb_array(:{param}::jsonb))"
-        logger.debug("q: %s, w: %s", q, w)
-        return {"w": w, "q": q, "param": param}
-    return None
-
-
-class Filters:
-    def __init__(
-        self,
-        project: Optional[List[str]] = Query(
-            None, aliases=(
-                "project",
-                "projectid",
-                "project_id",
-                "projectId[]",
-                "source_name",
-            ),
-        ),
-        country: Optional[List[str]] = Query(
-            None, aliases=(
-                "country[]",
-                "country[0]",
-                "country[1]",
-                "country[2]",
-                "country[3]",
-                "country[4]",
-                "country[5]",
-                "country[6]",
-                "country[7]",
-                "country[8]",
-                "country[9]",
-            ), max_length=2
-        ),
-        site_name: Optional[List[str]] = Query(
-            None,
-            aliases=(
-                "location",
-                "location[]",
-                "location[0]",
-                "location[1]",
-                "location[2]",
-                "location[3]",
-                "location[4]",
-                "location[5]",
-                "location[6]",
-                "location[7]",
-                "location[8]",
-                "location[9]",
-            ),
-        ),
-        city: Optional[List[str]] = Query(None, aliases=("city[]",)),
-        measurand: Optional[List[Measurand]] = Query(
-            None,
-            aliases=(
-                "parameter",
-                "parameter[]",
-                "parameter[0]",
-                "parameter[1]",
-                "parameter[2]",
-                "parameter[3]",
-                "parameter[4]",
-                "parameter[5]",
-                "parameter[6]",
-                "parameter[7]",
-                "parameter[8]",
-                "parameter[9]",
-            ),
-        ),
-        include_fields: Optional[List[IncludeFields]] = Query(
-            None,
-            aliases=(
-                "include_fields[]",
-                "include_fields[0]",
-                "include_fields[1]",
-                "include_fields[2]",
-                "include_fields[3]",
-                "include_fields[4]",
-                "include_fields[5]",
-                "include_fields[6]",
-                "include_fields[7]",
-                "include_fields[8]",
-                "include_fields[9]",
-            ),
-        ),
-        has_geo: Optional[bool] = None,
-        geo: Geo = Depends(),
-    ):
-        self.country = country
-        self.site_name = site_name
-        self.city = city
-        self.measurand = measurand
-        self.coordinates = geo.coordinates
-        self.has_geo = has_geo
-        self.radius = geo.radius
-        self.include_fields = include_fields
-        self.project = project
-
-    def get_measurement_q(self):
-        if self.measurand:
-            m_array = orjson.dumps([{"sensor_systems":[{"sensors":[{"measurand":m}]}]} for m in self.measurand]).decode()
-            measurand_clause = 'json @> ANY(jsonb_array(:measurand::jsonb))'
-            return({'w':measurand_clause, 'q': m_array, 'param': 'measurand'})
-
-    async def measurement_fields(self):
-        if self.include_fields is not None:
-            return ',' + ','.join([f'"{f}"' for f in self.include_fields])
-        else:
-            return ''
-
-    async def sql(self):
-        jsonpath = {}
-        params = {}
+    def where(self):
         wheres = []
-        if self.has_geo is not None:
-            jsonpath["has_geo"] = self.has_geo
+        for f, v in self:
+            logger.debug(f"APIBase {f} {v}")
+            if isinstance(v, List):
+                wheres.append(f"{f} = ANY(:{f})")
+        if len(wheres) > 0:
+            return (" AND ").join(wheres)
+        return " TRUE "
 
-        site_names_clause = await overlaps(
-            "site_names", "site_name", self.site_name
+
+def fix_datetime(
+    d: Union[datetime, date, str, int, None],
+    minutes_to_round_to: Optional[int] = None,
+):
+    # Make sure that date/datetime is turned into timzone
+    # aware datetime optionally rounding to
+    # given number of minutes
+    if d is None:
+        return None
+    if isinstance(d, str):
+        d = parse(d)
+    if isinstance(d, int):
+        d = datetime.fromtimestamp(d)
+    if isinstance(d, date):
+        d = datetime(
+            *d.timetuple()[:-6],
         )
-        country_clause = await isin("country", "country", self.country)
-        project_clause = await isin('source_name', 'project', self.project)
-        cities_clause = await overlaps("cities", "city", self.city)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=UTC)
+    if minutes_to_round_to is not None:
+        d -= timedelta(
+            minutes=d.minute % minutes_to_round_to,
+            seconds=d.second,
+            microseconds=d.microsecond,
+        )
+    return d
 
-        wheres.append(self.get_measurement_q())
-        wheres.append(site_names_clause)
-        wheres.append(country_clause)
-        wheres.append(cities_clause)
-        wheres.append(project_clause)
 
-        if self.coordinates is not None:
-            lon = self.coordinates.lon
-            lat = self.coordinates.lat
-            radius = self.radius
-            w = """
-                st_dwithin(
-                    st_makepoint(:lon,:lat)::geography,
-                    geog,
-                    :radius::int
-                )
-                """
+class DateRange(OBaseModel):
+    date_from: Union[datetime, date, None] = fix_datetime('2000-01-01')
+    date_to: Union[datetime, date, None] = fix_datetime(datetime.now())
+    date_from_adj: Union[datetime, date, None] = None
+    date_to_adj: Union[datetime, date, None] = None
 
-            wheres.append({"w": w})
-            params["lon"] = lon
-            params["lat"] = lat
-            params["radius"] = radius
+    @validator(
+        "date_from",
+        "date_to",
+        "date_from_adj",
+        "date_to_adj",
+        check_fields=False,
+    )
+    def check_dates(cls, v, values):
+        return fix_datetime(v)
 
-        if jsonpath != {}:
-            wheres.append(
-                {"w": "json @> :jsonpath", "q": orjson.dumps(jsonpath).decode(), "param": "jsonpath"}
-            )
-
-        where_stmts = [w["w"] for w in wheres if w is not None]
-        logger.debug("wheres: %s", where_stmts)
-
-        sql = " AND ".join(where_stmts)
-
-        for w in wheres:
-            if w is not None and w.get("param", None) is not None:
-                logger.debug(f"{w} {w['param']} {w['q']}")
-                params[w["param"]] = w["q"]
-        if sql == "":
-            sql = " TRUE "
-
-        return {"q": sql, "params": params}
-
-class MeasurementFilters(Filters):
-    def get_measurement_q(self):
-        if self.measurand:
-            measurand_clause = 'measurand = ANY(:measurand)'
-            return({'w':measurand_clause, 'q': self.measurand, 'param': 'measurand'})
-
-    async def sql(self):
-        wheres = []
-        params = {}
-        for p in ['city', 'country', 'measurand', 'site_name']:
-            vals = getattr(self, p)
-            if vals is not None:
-                wheres.append({
-                    'w': f"{p} = ANY(:{p})",
-                    'q': getattr(self,p),
-                    'param': p
-                })
-
-        if self.coordinates is not None:
-            lon = self.coordinates.lon
-            lat = self.coordinates.lat
-            radius = self.radius
-            w = """
-                st_dwithin(
-                    st_makepoint(:lon,:lat)::geography,
-                    geog,
-                    :radius::int
-                )
-                """
-
-            wheres.append({"w": w})
-            params["lon"] = lon
-            params["lat"] = lat
-            params["radius"] = radius
-
-        where_stmts = [w["w"] for w in wheres if w is not None]
-        logger.debug("wheres: %s", where_stmts)
-
-        sql = " AND ".join(where_stmts)
-
-        for w in wheres:
-            if w is not None and w.get("param", None) is not None:
-                logger.debug(f"{w} {w['param']} {w['q']}")
-                params[w["param"]] = w["q"]
-        if sql == "":
-            sql = " TRUE "
-
-        return {"q": sql, "params": params}
 
 def default(obj):
     return str(obj)
@@ -451,7 +402,7 @@ def dbkey(m, f, query, args):
     ).decode()
     dbkey = f"{query}{j}"
     h = hash(dbkey)
-    logger.debug(f"dbkey: {dbkey} h: {h}")
+    # logger.debug(f"dbkey: {dbkey} h: {h}")
     return h
 
 
@@ -468,37 +419,68 @@ cache_config = {
 
 class DB:
     def __init__(self, request: Request):
-        self.pool = request.app.state.pool
+        self.request = request
+
+    async def pool(self):
+        if self.request.app.state.pool:
+            return self.request.app.state.pool
+        self.request.app.state.pool = await asyncpg.create_pool(
+                settings.DATABASE_URL, command_timeout=60
+            )
+        return self.request.app.state.pool
+
 
     @cached(900, **cache_config)
     async def fetch(self, query, kwargs):
+        pool = await self.pool()
         start = time.time()
-        logger.debug("Start time: %s", start)
+        logger.debug("Start time: %s Query: %s Args:%s", start, query, kwargs)
         rquery, args = render(query, **kwargs)
-        r = await self.pool.fetch(rquery, *args)
-        logger.debug(
-            "query: %s, args: %s, took: %s", rquery, args, time.time() - start
-        )
-        return r  # [dict(row) for row in r]
-
-    @cached(900, **cache_config)
-    async def fetchrow(self, query, kwargs):
-        start = time.time()
-        logger.debug("Start time: %s", start)
-        rquery, args = render(query, **kwargs)
-        r = await self.pool.fetchrow(rquery, *args)
-        logger.debug(
-            "query: %s, args: %s, took: %s", rquery, args, time.time() - start
-        )
-        return r  # dict(r)
-
-    @cached(900, **cache_config)
-    async def fetchval(self, query, kwargs):
-        start = time.time()
-        logger.debug("Start time: %s", start)
-        rquery, args = render(query, **kwargs)
-        r = await self.pool.fetchval(rquery, *args)
+        try:
+            r = await pool.fetch(rquery, *args)
+        except asyncpg.exceptions.UndefinedColumnError as e:
+            raise ValueError(f"{e}")
+        except asyncpg.exceptions.DataError as e:
+            raise ValueError(f"{e}")
+        except asyncpg.exceptions.CharacterNotInRepertoireError as e:
+            raise ValueError(f"{e}")
         logger.debug(
             "query: %s, args: %s, took: %s", rquery, args, time.time() - start
         )
         return r
+
+    async def fetchrow(self, query, kwargs):
+        r = await self.fetch(query, kwargs)
+        if len(r) > 0:
+            return r[0]
+        return []
+
+    async def fetchval(self, query, kwargs):
+        r = await self.fetchrow(query, kwargs)
+        if len(r) > 0:
+            return r[0]
+        return []
+
+    async def fetchOpenAQResult(self, query, kwargs):
+        rows = await self.fetch(query, kwargs)
+
+        if len(rows) == 0:
+            found = 0
+            results = []
+        else:
+            found = rows[0]["count"]
+            # results = [orjson.dumps(r[1]) for r in rows]
+            if len(rows) > 0 and rows[0][1] is not None:
+                results = [
+                    orjson.loads(r[1]) for r in rows if isinstance(r[1], str)
+                ]
+            else:
+                results = []
+
+        meta = Meta(
+            page=kwargs["page"],
+            limit=kwargs["limit"],
+            found=found,
+        )
+        output = OpenAQResult(meta=meta, results=results)
+        return output
