@@ -2,7 +2,7 @@ import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, Query
-from pydantic.typing import Literal
+from pydantic.typing import Literal, Optional
 import jq
 from .base import (
     DB,
@@ -16,6 +16,7 @@ from .base import (
     OpenAQResult,
     Project,
     SourceName,
+    Sort
 )
 
 logger = logging.getLogger("locations")
@@ -213,7 +214,9 @@ class Projects(Project, APIBase):
         wheres = []
         for f, v in self:
             if v is not None:
+                logger.debug(f" setting where for {f} {v} ")
                 if f == "project" and all(isinstance(x, int) for x in v):
+                    logger.debug(" using int id")
                     wheres.append(" groups_id = ANY(:project) ")
                 elif f == "project":
                     wheres.append(" name = ANY(:project) ")
@@ -232,41 +235,49 @@ async def projects_get(
 ):
 
     q = f"""
-        WITH t AS (
-        SELECT
-            groups_id as "id",
-            name,
-            subtitle,
-            sum(value_count) as count,
-            min("firstUpdated") as "firstUpdated",
-            max("lastUpdated") as "lastUpdated",
-            count(*) as locations,
-            array_agg(DISTINCT measurand) as parameters
-        FROM rollups
-        LEFT JOIN groups USING (groups_id)
-        LEFT JOIN measurands USING (measurands_id)
-        LEFT JOIN LATERAL (
+        WITH bysensor AS (
             SELECT
-                min(first_datetime) as "firstUpdated",
-                max(last_datetime) as "lastUpdated"
-            FROM groups_sensors g, sensors_first_last sfl
+                groups_id as "id",
+                name,
+                subtitle,
+                geog,
+                value_count as count,
+                value_sum / value_count as average,
+                locations,
+                measurand,
+                units as unit,
+                sources,
+                last(last_value, last_datetime) as "lastValue",
+                max(last_datetime) as "lastUpdated",
+                min(first_datetime) as "firstUpdated"
+            FROM
+                rollups.rollups LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
             WHERE
-                g.groups_id = rollups.groups_id
-                AND
-                sfl.sensors_id = g.sensors_id
-            ) as fl ON TRUE
-        WHERE
-        type='source' AND rollup='total'
-        AND {projects.where()}
-        GROUP BY
-        1,2,3
-        ORDER BY "{projects.order_by}" {projects.sort}
+                type='source' AND rollup='total'
+                AND {projects.where()}
+            GROUP BY 1,2,3,4,5,6,7,8,9,10
+            ORDER BY "{projects.order_by}" {projects.sort}
 
         )
-        SELECT count(*) OVER () as count, row_to_json(t) as json FROM t
+        , overall as (
+        SELECT
+            "id",
+            name,
+            subtitle,
+            (st_asgeojson(geog)::jsonb)->'coordinates' as coordinates,
+            sources,
+            sum(count) as measurements,
+            max(locations) as locations,
+            jsonb_agg(to_jsonb(bysensor) - '{{id,name,subtitle,geog,sources}}'::text[]) as parameters
+            FROM bysensor
+            GROUP BY 1,2,3,4,5
+        )
+        select count(*) OVER () as count, to_jsonb(overall) as json from overall
         LIMIT :limit
         OFFSET :offset
+            ;
     """
+
 
     output = await db.fetchOpenAQResult(q, projects.dict())
 
@@ -282,19 +293,32 @@ class Locations(Location, City, Country, Geo, Measurands, HasGeo, APIBase):
         "firstUpdated",
         "lastUpdated",
     ] = Query("lastUpdated")
+    sort: Optional[Sort] = Query("desc")
+    isMobile: Optional[bool] = None
 
     def where(self):
         wheres = []
+
         for f, v in self:
             if v is not None:
                 if f == "project":
-                    wheres.append(" groups_id = ANY(:project) ")
+                    if all(isinstance(x, int) for x in self.project):
+                        wheres.append("groups_id = ANY(:project)")
+                    else:
+                        wheres.append("name = ANY(:project)")
                 elif f == "location" and all(isinstance(x, int) for x in v):
                     wheres.append(" id = ANY(:location) ")
                 elif f == "location":
                     wheres.append(" name = ANY(:location) ")
-                elif isinstance(v, List):
-                    wheres.append(f"{f} = ANY(:{f})")
+                elif f == "parameter":
+                    wheres.append("""
+                        parameters @> ANY(jsonb_array_query('measurand',:parameter::text[]))
+                        """
+                    )
+                elif f == "isMobile":
+                    wheres.append(' "isMobile" ')
+                # elif isinstance(v, List):
+                #     wheres.append(f"{f} = ANY(:{f})")
         if len(wheres) > 0:
             return (" AND ").join(wheres)
         return " TRUE "
@@ -358,6 +382,7 @@ async def latest_get(
                 location: .name,
                 city: .city,
                 country: .country,
+                coordinates: .coordinates,
                 measurements: [
                     .parameters[] | {
                         parameter: .measurand,

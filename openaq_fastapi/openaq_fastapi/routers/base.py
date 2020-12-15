@@ -324,6 +324,7 @@ class Temporal(str, Enum):
     dow = "dow"
     hour = "hour"
     total = "total"
+    hod = "hod"
 
 
 # class IncludeFields(str, Enum):
@@ -375,8 +376,8 @@ def fix_datetime(
 
 
 class DateRange(OBaseModel):
-    date_from: Union[datetime, date, None] = None
-    date_to: Union[datetime, date, None] = None
+    date_from: Union[datetime, date, None] = fix_datetime('2000-01-01')
+    date_to: Union[datetime, date, None] = fix_datetime(datetime.now())
     date_from_adj: Union[datetime, date, None] = None
     date_to_adj: Union[datetime, date, None] = None
 
@@ -418,15 +419,25 @@ cache_config = {
 
 class DB:
     def __init__(self, request: Request):
-        self.pool = request.app.state.pool
+        self.request = request
+
+    async def pool(self):
+        if self.request.app.state.pool:
+            return self.request.app.state.pool
+        self.request.app.state.pool = await asyncpg.create_pool(
+                settings.DATABASE_URL, command_timeout=60
+            )
+        return self.request.app.state.pool
+
 
     @cached(900, **cache_config)
     async def fetch(self, query, kwargs):
+        pool = await self.pool()
         start = time.time()
         logger.debug("Start time: %s Query: %s Args:%s", start, query, kwargs)
         rquery, args = render(query, **kwargs)
         try:
-            r = await self.pool.fetch(rquery, *args)
+            r = await pool.fetch(rquery, *args)
         except asyncpg.exceptions.UndefinedColumnError as e:
             raise ValueError(f"{e}")
         except asyncpg.exceptions.DataError as e:

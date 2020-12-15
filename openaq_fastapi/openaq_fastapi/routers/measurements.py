@@ -18,6 +18,7 @@ from .base import (
     OpenAQResult,
     Meta,
     Sort,
+    fix_datetime,
 )
 
 logger = logging.getLogger("locations")
@@ -40,7 +41,7 @@ class Measurements(
         if self.lon and self.lat:
             wheres.append(
                 " st_dwithin(st_makepoint(:lon, :lat)::geography,"
-                " b.geom::geography, :radius) "
+                " b.geog, :radius) "
             )
         for f, v in self:
             if v is not None:
@@ -69,24 +70,49 @@ async def measurements_get(
     db: DB = Depends(),
     m: Measurements = Depends(Measurements.depends()),
 ):
+    count = None
     date_from = m.date_from
     date_to = m.date_to
 
+    rolluptype = "node"
+    joins = """
+        LEFT JOIN rollups.groups_sensors USING (groups_id)
+        LEFT JOIN rollups.measurements_fastapi_base b
+        ON (groups_sensors.sensors_id=b.sensors_id)
+    """
+    params = m.dict()
+    where = m.where()
+    if m.is_mobile is None:
+        if (
+            (m.location is None or len(m.location)) == 0
+            and is_mobile is None
+            and m.coordinates is None
+        ):
+            joins = ""
+            if m.country is None or len(m.country) == 0:
+                rolluptype = "total"
+            else:
+                rolluptype = "country"
+                params = {"country": m.country}
+                where = " name =ANY(:country) "
     # get overall summary numbers
     q = f"""
         SELECT
             sum(value_count),
-            min(st),
-            max(et)
-        FROM rollups
-        LEFT JOIN groups_w_measurand USING (groups_id, measurands_id)
-        LEFT JOIN groups_sensors USING (groups_id)
-        LEFT JOIN measurements_fastapi_base b USING (sensors_id)
-        WHERE rollup = 'total' and type='node'
+            min(first_datetime),
+            max(last_datetime)
+        FROM rollups.rollups
+        LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+        {joins}
+        WHERE rollup = 'month' and type='{rolluptype}'
             AND
-            {m.where()}
+            st >= :date_from::timestamptz
+            AND
+            st < :date_to::timestamptz
+            AND
+            {where}
         """
-    rows = await db.fetch(q, m.dict())
+    rows = await db.fetch(q, params)
     logger.debug(f"{rows}")
     if rows is None:
         return OpenAQResult()
@@ -107,7 +133,7 @@ async def measurements_get(
     else:
         date_to = min(date_to, range_end, datetime.now().replace(tzinfo=UTC))
 
-    count = None
+    count = total_count
     # if time is unbounded, we can just use the total count
     if (date_from == range_start) and (date_to == range_end):
         count = total_count
@@ -118,75 +144,13 @@ async def measurements_get(
     qparams = m.dict()
     qparams["date_from_adj"] = date_from_adj
     qparams["date_to_adj"] = date_to_adj
-    if False:
 
-        # Get stats from previous month
-        q = f"""
-            SELECT
-                st,
-                sum(value_count)
-            FROM rollups
-            LEFT JOIN groups_w_measurand USING (groups_id, measurands_id)
-            LEFT JOIN groups_sensors USING (groups_id)
-            LEFT JOIN measurements_fastapi_base USING (sensors_id)
-            WHERE rollup = 'month' and type='node'
-                AND
-                {m.where()}
-            AND
-                st
-                BETWEEN :date_to_adj::timestamptz - '2 months'::interval
-                AND :date_to_adj::timestamptz
-            GROUP BY st
-            ORDER BY st DESC OFFSET 1 LIMIT 1
-            ;
-        """
-        row = await db.fetchrow(q, qparams)
-        logger.debug(f"row {row}")
-        if row:
-            st = row[0]
-            monthcount = row[1]
-            logger.debug(f"Last month {st} {monthcount}")
-
-            # estimate time it would take to fulfill page requirements
-            # buffer by a factor of 2 for variability
-            seconds_per_count = 30 * 24 * 60 * 60 / int(monthcount)
-            delta = timedelta(seconds=int(seconds_per_count * m.limit * 10))
-            logger.debug(f"delta: {delta}")
-        else:
-            delta = timedelta(days=30)
-            seconds_per_count = 60 * 30
-
-        count = int(
-            (date_to_adj - date_from_adj).total_seconds() / seconds_per_count
-        )
-
-        qparams["date_from_adj"] = date_from_adj
-        qparams["date_to_adj"] = date_to_adj
-
-        if False and count is None:
-            estimated_count_q = f"""
-                EXPLAIN (FORMAT JSON)
-                SELECT 1 FROM measurements_fastapi_base b
-                LEFT JOIN all_measurements a USING (sensors_id)
-                WHERE
-                    datetime >= :date_from_adj::timestamptz
-                    AND
-                    datetime <= :date_to_adj::timestamptz
-                    AND
-                    {m.where()}
-                ;
-                """
-
-            estimate_j = await db.fetchval(estimated_count_q, qparams)
-            estimate_d = json.loads(estimate_j)
-            logger.debug(estimate_d[0])
-            count = estimate_d[0]["Plan"]["Plan Rows"]
-            logger.debug(f"Estimate: {count}")
-            pass
+    days = (date_to_adj - date_from_adj).total_seconds() / (24 * 60 * 60)
+    logger.debug(f" days {days}")
 
     # if we are ordering by time, keep us from searching everything
     # for paging
-    delta = timedelta(days=15)
+    delta = timedelta(days=5)
     if m.order_by == "datetime":
         if m.sort == "asc":
             date_to_adj = date_from_adj + delta
@@ -196,41 +160,38 @@ async def measurements_get(
     qparams["date_from_adj"] = date_from_adj
     qparams["date_to_adj"] = date_to_adj
 
-    count = total_count
+    # count = total_count
     results = []
     if count > 0:
         if m.sort == "asc":
             rangestart = date_from
-            rangeend = date_from + delta
+            rangeend = min(date_from + delta, date_to)
         else:
             rangeend = date_to
-            rangestart = date_to - delta
+            rangestart = max(date_to - delta, date_from)
 
         logger.debug(f"Entering loop {count} {rangestart} {rangeend}")
         rc = 0
         qparams["rangestart"] = rangestart
         qparams["rangeend"] = rangeend
-        while (
-            rc < m.limit
-            and rangestart >= date_from
-            and rangeend <= date_to
-        ):
+        while rc < m.limit and rangestart >= date_from and rangeend <= date_to:
             logger.debug(f"looping... {rc} {rangestart} {rangeend}")
             q = f"""
             WITH t AS (
                 SELECT
+                    sensors_id as location_id,
                     site_name as location,
                     measurand as parameter,
                     value,
                     datetime,
                     timezone,
-                    COALESCE(a.geom, b.geom, NULL) as geom,
+                    COALESCE(a.geog, b.geog, NULL) as geog,
                     units as unit,
                     country,
                     city,
                     ismobile
-                FROM measurements_fastapi_base b
-                LEFT JOIN all_measurements a USING (sensors_id)
+                FROM rollups.measurements_fastapi_base b
+                LEFT JOIN measurements_all a USING (sensors_id)
                 WHERE {m.where()}
                 AND datetime
                 BETWEEN :rangestart::timestamptz
@@ -240,6 +201,7 @@ async def measurements_get(
                 LIMIT :limit
                 ), t1 AS (
                     SELECT
+                        location_id,
                         location,
                         parameter,
                         json_build_object(
@@ -248,15 +210,15 @@ async def measurements_get(
                                 ) as date,
                         unit,
                         json_build_object(
-                                'latitude', st_y(geom),
-                                'longitude', st_x(geom)
+                                'latitude', st_y(geog::geometry),
+                                'longitude', st_x(geog::geometry)
                             ) as coordinates,
                         country,
                         city,
                         ismobile as "isMobile"
                     FROM t
                 )
-                SELECT {count}::int as count, row_to_json(t1) as json FROM t1;
+                SELECT {count}::bigint as count, row_to_json(t1) as json FROM t1;
             """
 
             rows = await db.fetch(q, qparams)
@@ -271,14 +233,18 @@ async def measurements_get(
                             if isinstance(r[1], str)
                         ]
                     )
-            logger.debug(f"ran query... {rc} {rangestart} {date_from_adj}{rangeend} {date_to_adj}")
+            logger.debug(
+                f"ran query... {rc} {rangestart} {date_from_adj}{rangeend} {date_to_adj}"
+            )
             if m.sort == "desc":
                 rangestart -= delta
                 rangeend -= delta
             else:
                 rangestart += delta
                 rangeend += delta
-            logger.debug(f"stepped ranges... {rc} {rangestart} {date_from_adj}{rangeend} {date_to_adj}")
+            logger.debug(
+                f"stepped ranges... {rc} {rangestart} {date_from_adj}{rangeend} {date_to_adj}"
+            )
             qparams["rangestart"] = rangestart
             qparams["rangeend"] = rangeend
     meta = Meta(
