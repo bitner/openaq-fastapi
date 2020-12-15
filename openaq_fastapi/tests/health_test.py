@@ -9,6 +9,7 @@ from openaq_fastapi.settings import settings
 from openaq_fastapi.main import app
 
 import os
+
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
 schemathesis.fixups.install()
@@ -20,7 +21,6 @@ else:
     schema = schemathesis.from_uri(
         f"{settings.OPENAQ_FASTAPI_URL}/openapi.json"
     )
-
 
 
 @pytest.fixture
