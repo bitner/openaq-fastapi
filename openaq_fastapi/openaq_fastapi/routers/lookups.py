@@ -377,7 +377,7 @@ async def latest_get(
 
     latest_jq = jq.compile(
         """
-        .[] | [
+        .[] |
             {
                 location: .name,
                 city: .city,
@@ -392,7 +392,7 @@ async def latest_get(
                     }
                 ]
             }
-        ]
+
         """
     )
 
@@ -412,7 +412,7 @@ async def locationsv1_get(
 
     latest_jq = jq.compile(
         """
-        .[] | [
+        .[] |
             {
                 id: .id,
                 country: .country,
@@ -432,7 +432,7 @@ async def locationsv1_get(
                 ],
                 count: .parameters| map(.count) | add
             }
-        ]
+
         """
     )
 
