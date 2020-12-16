@@ -312,6 +312,10 @@ class Locations(Location, City, Country, Geo, Measurands, HasGeo, APIBase):
                     wheres.append(" id = ANY(:location) ")
                 elif f == "location":
                     wheres.append(" name = ANY(:location) ")
+                elif f == "country":
+                    wheres.append(" country = ANY(:country) ")
+                elif f == "city":
+                    wheres.append(" country = ANY(:city) ")
                 elif f == "parameter":
                     wheres.append(
                         """

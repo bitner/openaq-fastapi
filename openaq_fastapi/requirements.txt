@@ -1,5 +1,6 @@
 # fastapi>=0.61.2
 git+git://github.com/bitner/fastapi.git@multialias
+git+https://github.com/developmentseed/timvt.git
 mangum>=0.1.0
 fastapi-utils
 wheel
