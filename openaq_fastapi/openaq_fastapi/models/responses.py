@@ -22,20 +22,6 @@ class OpenAQResult(BaseModel):
     results: List[Any] = []
 
 
-class CountriesRow(BaseModel):
-    code: str
-    name: str
-    locations: int
-    firstUpdated: date
-    lastUpdated: date
-    parameters: List[str]
-
-
-class OpenAQCountriesResult(OpenAQResult):
-    results: List[CountriesRow]
-
-
-# New & untested
 class MeasurementsRow(BaseModel):
     location_id: int
     location: str
@@ -51,20 +37,47 @@ class MeasurementsRow(BaseModel):
 class OpenAQMeasurementsResult(OpenAQResult):
     results: List[MeasurementsRow]
 
-# SKIPPED - averages, seems like it needs input? (422 unprocessable response)
+
+class AveragesRow(BaseModel):
+    id: int
+    name: str
+    unit: str
+    year: str
+    average: float
+    subtitle: str
+    parameter: str
+    measurement_count: int
+
+
+class OpenAQAveragesResult(OpenAQResult):
+    results: List[AveragesRow]
+
 
 class CitiesRow(BaseModel):
     country: str
     city: str
     count: int
     locations: int
-    firstUpdated: str  # datetime string
-    lastUpdated: str  # dt string
+    firstUpdated: str
+    lastUpdated: str
     parameters: List[str]
 
 
 class OpenAQCitiesResult(OpenAQResult):
     results: List[CitiesRow]
+
+
+class CountriesRow(BaseModel):
+    code: str
+    name: str
+    locations: int
+    firstUpdated: date
+    lastUpdated: date
+    parameters: List[str]
+
+
+class OpenAQCountriesResult(OpenAQResult):
+    results: List[CountriesRow]
 
 
 class SourcesRow(BaseModel):
