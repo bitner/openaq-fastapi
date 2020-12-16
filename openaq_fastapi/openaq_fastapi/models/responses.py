@@ -22,13 +22,23 @@ class OpenAQResult(BaseModel):
     results: List[Any] = []
 
 
+class CoordinatesDict(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class DateDict(BaseModel):
+    utc: str
+    local: str
+
+
 class MeasurementsRow(BaseModel):
     location_id: int
     location: str
     parameter: str
-    date: Dict[str, str]  # datetime string?
+    date: DateDict
     unit: str
-    coordiantes: Dict[str, float]
+    coordiantes: CoordinatesDict
     country: str
     city: str
     isMobile: bool
@@ -111,13 +121,24 @@ class OpenAQParametersResult(OpenAQResult):
     results: List[ParametersRow]
 
 
+class ProjectParameterDetails(BaseModel):
+    unit: str
+    count: int
+    average: float
+    lastValue: float
+    locations: int
+    measurand: str
+    lastUpdated: str
+    firstUpdated: str
+
+
 class ProjectsRow(BaseModel):
     id: int
     name: str
-    sources: str  #TODO can't find example that isn't null
+    sources: str  # TODO can't find example that isn't null
     subtitle: str
     locations: int
-    # parameters: List[Dict[]]  # TODO can you do complex dicts like this?
+    parameters: List[ProjectParameterDetails]
     coordinates: List[List[float]]
     measurements: int
 
@@ -126,16 +147,39 @@ class OpenAQProjectsResult(OpenAQResult):
     results: List[ProjectsRow]
 
 
+class SourceDetails(BaseModel):
+    url: str  # TODO added as string to encompass "unused"; should this be AnyUrl instead?
+    city: str
+    name: str
+    active: bool
+    adapter: str
+    country: str
+    contacts: List[str]
+    sourceURL: AnyUrl
+    description: str
+
+
+class LocationParameterDetails(BaseModel):
+    id: int
+    unit: str
+    count: int
+    average: float
+    lastValue: float
+    measurand: str
+    lastUpdated: str
+    firstUpdated: str
+
+
 class LocationsRow(BaseModel):
     id: int
     city: str
     name: str
     country: str
-    # sources: List[Dict[]]  # TODO can you do complex dicts like this?
+    sources: List[SourceDetails]
     isMobile: bool
-    # parameters: List[Dict[]]  # TODO can you do complex dicts like this?
+    parameters: List[LocationParameterDetails]
     sourceType: str
-    coordinates: Dict[str, float]
+    coordinates: CoordinatesDict
     lastUpdated: str
     firstUpdated: str
     measurements: int
@@ -145,12 +189,19 @@ class OpenAQLocationsResult(OpenAQResult):
     results: List[LocationsRow]
 
 
+class MeasurementDetails(BaseModel):
+    parameter: str
+    value: float
+    lastUpdated: str
+    unit: str
+
+
 class LatestRow(BaseModel):
     location: str
     city: str
     country: str
-    coordinates: Dict[str, float]
-    # measurements: List[Dict[]]  # TODO can you do complex dicts like this?
+    coordinates: CoordinatesDict
+    measurements: List[MeasurementDetails]
 
 
 class OpenAQLatestResult(OpenAQResult):
