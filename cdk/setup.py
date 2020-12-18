@@ -1,6 +1,6 @@
 import setuptools
 
-aws_cdk_version = "1.73.0"
+aws_cdk_version = "1.79.0"
 aws_cdk_reqs = [
     "core",
     "aws-lambda",
@@ -8,6 +8,9 @@ aws_cdk_reqs = [
     "aws-apigatewayv2-integrations",
     "aws-lambda-python",
     "aws-lambda-nodejs",
+    "aws-s3",
+    "aws-lambda-event-sources",
+    "aws_s3_notifications",
 ]
 
 install_requires=[

@@ -34,12 +34,13 @@
   <script>
 
     const endpoint = '{{ endpoint }}'
+    const mobileendpoint = '{{ mobileendpoint }}'
 
     var scope = { metadata: {}, config: {} }
 
     var map = new mapboxgl.Map({
       container: 'map',
-      style: { version: 8, sources: {}, layers: [] },
+      style: 'https://maputnik.github.io/osm-liberty/style.json',
       center: [0, 0],
       zoom: 0
     })
@@ -48,7 +49,26 @@
       map.addSource('table', {
         type: 'vector',
         url: endpoint,
+        maxzoom: 20,
       })
+      map.addSource('mobile', {
+        type: 'vector',
+        url: mobileendpoint,
+        maxzoom: 20,
+      })
+
+      map.addLayer({
+        id: 'bounds',
+        source: 'table',
+        'source-layer': 'bounds',
+        type: 'fill',
+        paint: {
+          'fill-color': 'rgba(100, 50, 240, 0.1)',
+          'fill-outline-color': '#000',
+          'fill-opacity': .5,
+        }
+      })
+
       map.addLayer({
         id: 'table',
         source: 'table',
@@ -59,6 +79,19 @@
           'circle-stroke-color': '#000'
         }
       })
+
+      map.addLayer({
+        id: 'mobile',
+        source: 'mobile',
+        'source-layer': 'default',
+        type: 'circle',
+        paint: {
+          'circle-color': 'rgba(10, 10, 240, 0.4)',
+          'circle-stroke-color': '#000'
+        }
+      })
+
+
 
       // Change the cursor to a pointer when the mouse is over the places layer.
       map.on('mouseenter', 'table', function () {
@@ -71,6 +104,29 @@
       })
 
       map.on('click', 'table', function (e) {
+        props = e.features[0].properties;
+        t = '<table>';
+        for (var key in props){
+          t += "<tr><td>" + key + "</td><td>" + props[key] + "</td></tr>";
+        }
+        t += '</table>';
+        new mapboxgl.Popup()
+          .setLngLat(e.lngLat)
+          .setHTML(t)
+          .addTo(map);
+      })
+
+        // Change the cursor to a pointer when the mouse is over the places layer.
+      map.on('mouseenter', 'mobile', function () {
+        map.getCanvas().style.cursor = 'pointer'
+      })
+
+      // Change it back to a pointer when it leaves.
+      map.on('mouseleave', 'mobile', function () {
+        map.getCanvas().style.cursor = ''
+      })
+
+      map.on('click', 'mobile', function (e) {
         props = e.features[0].properties;
         t = '<table>';
         for (var key in props){

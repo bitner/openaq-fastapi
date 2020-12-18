@@ -7,7 +7,6 @@ from types import FunctionType
 from typing import Dict, List, Optional, Union
 
 import asyncpg
-import humps
 import orjson
 from aiocache import SimpleMemoryCache, cached
 from aiocache.plugins import HitMissRatioPlugin, TimingPlugin
@@ -92,7 +91,7 @@ class OBaseModel(BaseModel):
         min_anystr_length = 1
         validate_assignment = True
         allow_population_by_field_name = True
-        alias_generator = humps.decamelize
+        # alias_generator = humps.decamelize
         anystr_strip_whitespace = True
 
     """@validator("*", each_item=True)
@@ -139,13 +138,21 @@ class City(OBaseModel):
 
 
 class Country(OBaseModel):
+    country_id: Optional[str] = Query(
+        None, min_length=2, max_length=2, regex="[a-zA-Z][a-zA-Z]"
+    )
     country: Optional[List[str]] = Query(
         None, min_length=2, max_length=2, regex="[a-zA-Z][a-zA-Z]"
     )
 
     @validator("country", check_fields=False)
-    def validate_country(cls, v):
+    def validate_country(cls, v, values):
+        logger.debug(f"validating countries {v} {values}")
+        cid = values.get('country_id')
+        if cid is not None:
+            v = [cid]
         if v is not None:
+            logger.debug(f"returning countries {v} {values}")
             return [str.upper(val) for val in v]
         return None
 
@@ -314,6 +321,7 @@ class Spatial(str, Enum):
     country = "country"
     location = "location"
     project = "project"
+    total = "total"
 
 
 class Temporal(str, Enum):
@@ -417,6 +425,18 @@ cache_config = {
 }
 
 
+async def db_pool(pool):
+    if pool is None:
+        pool = await asyncpg.create_pool(
+            settings.DATABASE_URL,
+            command_timeout=14,
+            max_inactive_connection_lifetime=15,
+            min_size=1,
+            max_size=10,
+        )
+    return pool
+
+
 class DB:
     def __init__(self, request: Request):
         self.request = request
@@ -426,10 +446,8 @@ class DB:
         return pool
 
     async def pool(self):
-        if self.request.app.state.pool:
-            return self.request.app.state.pool
-        self.request.app.state.pool = await asyncpg.create_pool(
-            settings.DATABASE_URL, command_timeout=60
+        self.request.app.state.pool = await db_pool(
+            self.request.app.state.pool
         )
         return self.request.app.state.pool
 
@@ -439,18 +457,22 @@ class DB:
         start = time.time()
         logger.debug("Start time: %s Query: %s Args:%s", start, query, kwargs)
         rquery, args = render(query, **kwargs)
-        try:
-            r = await pool.fetch(rquery, *args)
-        except asyncpg.exceptions.UndefinedColumnError as e:
-            raise ValueError(f"{e}")
-        except asyncpg.exceptions.DataError as e:
-            raise ValueError(f"{e}")
-        except asyncpg.exceptions.CharacterNotInRepertoireError as e:
-            raise ValueError(f"{e}")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"{e}")
+        async with pool.acquire() as con:
+            try:
+                r = await con.fetch(rquery, *args)
+            except asyncpg.exceptions.UndefinedColumnError as e:
+                raise ValueError(f"{e}")
+            except asyncpg.exceptions.DataError as e:
+                raise ValueError(f"{e}")
+            except asyncpg.exceptions.CharacterNotInRepertoireError as e:
+                raise ValueError(f"{e}")
+            except Exception as e:
+                logger.debug(f"Database Error: {e}")
+                raise HTTPException(status_code=500, detail=f"{e}")
         logger.debug(
-            "query: %s, args: %s, took: %s", rquery, args, time.time() - start
+            "query took: %s results_firstrow: %s",
+            time.time() - start,
+            str(r and r[0])[0:500]
         )
         return r
 

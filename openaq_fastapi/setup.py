@@ -12,7 +12,6 @@ setup(
     long_description=open("README.md").read(),
     install_requires=[
         "fastapi @ git+https://github.com/bitner/fastapi.git@multialias",
-        "timvt @ git+https://github.com/developmentseed/timvt.git",
         "mangum>=0.1.0",
         "fastapi-utils",
         "wheel",
@@ -27,7 +26,8 @@ setup(
         "msgpack",
         "asyncpg",
         "uvicorn",
-        "pyhumps",
+        "jinja2",
+        "typer",
     ],
     extras_require={
         "dev": [
@@ -40,6 +40,13 @@ setup(
         ]
     },
     entry_points={
-        "console_scripts": ["openaq_fastapi=openaq_fastapi.main:run"]
+        "console_scripts": [
+            "openaqapi=openaq_fastapi.main:run",
+            "openaqfetch=openaq_fastapi.ingest.fetch:app",
+        ]
+    },
+    include_package_data=True,
+    package_data={
+        "": ["*.sql"],
     },
 )

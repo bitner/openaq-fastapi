@@ -33,7 +33,7 @@ class Measurements(
         "datetime"
     )
     sort: Sort = "desc"
-    is_mobile: bool = None
+    isMobile: bool = None
 
     def where(self):
         wheres = []
@@ -52,8 +52,8 @@ class Measurements(
                     wheres.append(" measurand = ANY(:measurand) ")
                 elif f == "unit":
                     wheres.append(" units = ANY(:unit) ")
-                elif f == "is_mobile":
-                    wheres.append(" ismobile = :is_mobile ")
+                elif f == "isMobile":
+                    wheres.append(" ismobile = :mobile ")
 
                 elif f in ["country", "city"]:
                     wheres.append(f"{f} = ANY(:{f})")
@@ -80,8 +80,9 @@ async def measurements_get(
         ON (groups_sensors.sensors_id=b.sensors_id)
     """
     params = m.dict()
+    params['mobile'] = m.isMobile
     where = m.where()
-    if m.is_mobile is None:
+    if m.isMobile is None:
         if (
             (m.location is None or len(m.location)) == 0
             and m.is_mobile is None
@@ -140,9 +141,9 @@ async def measurements_get(
     date_from_adj = date_from
     date_to_adj = date_to
 
-    qparams = m.dict()
-    qparams["date_from_adj"] = date_from_adj
-    qparams["date_to_adj"] = date_to_adj
+
+    params["date_from_adj"] = date_from_adj
+    params["date_to_adj"] = date_to_adj
 
     days = (date_to_adj - date_from_adj).total_seconds() / (24 * 60 * 60)
     logger.debug(f" days {days}")
@@ -156,8 +157,8 @@ async def measurements_get(
         else:
             date_from_adj = date_to_adj - delta
 
-    qparams["date_from_adj"] = date_from_adj
-    qparams["date_to_adj"] = date_to_adj
+    params["date_from_adj"] = date_from_adj
+    params["date_to_adj"] = date_to_adj
 
     # count = total_count
     results = []
@@ -171,8 +172,8 @@ async def measurements_get(
 
         logger.debug(f"Entering loop {count} {rangestart} {rangeend}")
         rc = 0
-        qparams["rangestart"] = rangestart
-        qparams["rangeend"] = rangeend
+        params["rangestart"] = rangestart
+        params["rangeend"] = rangeend
         while rc < m.limit and rangestart >= date_from and rangeend <= date_to:
             logger.debug(f"looping... {rc} {rangestart} {rangeend}")
             q = f"""
@@ -189,8 +190,8 @@ async def measurements_get(
                     country,
                     city,
                     ismobile
-                FROM rollups.measurements_fastapi_base b
-                LEFT JOIN measurements_all a USING (sensors_id)
+                FROM measurements_all a
+                LEFT JOIN rollups.measurements_fastapi_base b USING (sensors_id)
                 WHERE {m.where()}
                 AND datetime
                 BETWEEN :rangestart::timestamptz
@@ -223,7 +224,7 @@ async def measurements_get(
                 row_to_json(t1) as json FROM t1;
             """
 
-            rows = await db.fetch(q, qparams)
+            rows = await db.fetch(q, params)
             if rows:
                 logger.debug(f"{len(rows)} rows found")
                 rc = rc + len(rows)
@@ -249,8 +250,8 @@ async def measurements_get(
                 f"stepped ranges... {rc} {rangestart}"
                 f" {date_from_adj}{rangeend} {date_to_adj}"
             )
-            qparams["rangestart"] = rangestart
-            qparams["rangeend"] = rangeend
+            params["rangestart"] = rangestart
+            params["rangeend"] = rangeend
     meta = Meta(
         page=m.page,
         limit=m.limit,

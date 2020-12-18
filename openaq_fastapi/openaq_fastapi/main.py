@@ -1,18 +1,18 @@
 import logging
 from typing import Any, List
 
-import asyncpg
 from fastapi.exceptions import RequestValidationError
 import orjson
 from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from mangum import Mangum
 from pydantic import BaseModel, ValidationError
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from fastapi.encoders import jsonable_encoder
 from .middleware import (
-    CacheControlMiddleware,
+    CacheControlMiddleware, GetHostMiddleware,
     StripParametersMiddleware,
     TotalTimeMiddleware,
 )
@@ -23,6 +23,7 @@ from .routers.lookups import router as lookups_router
 from .routers.measurements import router as measurements_router
 from .routers.mvt import router as mvt_router
 from .settings import settings
+from .routers.base import db_pool
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -33,15 +34,34 @@ class ORJSONResponse(JSONResponse):
         return orjson.dumps(content)
 
 
-servers = [{"url": settings.OPENAQ_FASTAPI_URL}]
 
 
 app = FastAPI(
     title="OpenAQ",
     description="API for OpenAQ LCS",
     default_response_class=ORJSONResponse,
-    servers=servers,
+    docs_url="/",
+    servers=[{"url":"/"}]
 )
+
+
+def custom_openapi():
+    logger.debug(f"servers -- {app.state.servers}")
+    if app.state.servers is not None and app.openapi_schema:
+        return app.openapi_schema
+    logger.debug(f'Creating OpenApi Docs with server {app.state.servers}')
+    openapi_schema = get_openapi(
+        title=app.title,
+        description=app.description,
+        servers=app.state.servers,
+        version="2.0.0",
+        routes=app.routes,
+    )
+    # openapi_schema['info']['servers']=app.state.servers
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
@@ -54,6 +74,7 @@ app.add_middleware(
 app.add_middleware(StripParametersMiddleware)
 app.add_middleware(CacheControlMiddleware, cachecontrol="public, max-age=900")
 app.add_middleware(TotalTimeMiddleware)
+app.add_middleware(GetHostMiddleware)
 
 
 class OpenAQValidationResponseDetail(BaseModel):
@@ -79,12 +100,10 @@ async def openaq_exception_handler(request, exc):
 async def startup_event():
     """
     Application startup:
-    register the database connection and create table list.
+    register the database
     """
     logger.info(f"Connecting to {settings.DATABASE_URL}")
-    app.state.pool = await asyncpg.create_pool(
-        settings.DATABASE_URL, command_timeout=60
-    )
+    app.state.pool = await db_pool(None)
     logger.info("Connection established")
 
 
@@ -105,6 +124,13 @@ def pong():
     * show a lifesign
     """
     return {"ping": "pong!"}
+
+
+@app.get("/favicon.ico")
+def favico():
+    return RedirectResponse(
+        "https://openaq.org/assets/graphics/meta/favicon.png"
+    )
 
 
 # app.include_router(nodes_router)

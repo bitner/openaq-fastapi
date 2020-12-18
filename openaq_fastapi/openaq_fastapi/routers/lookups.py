@@ -76,7 +76,8 @@ class Countries(Country, APIBase):
         "country"
     )
 
-
+@router.get("/v1/countries/{country_id}", response_model=OpenAQResult)
+@router.get("/v2/countries/{country_id}", response_model=OpenAQResult)
 @router.get("/v1/countries", response_model=OpenAQResult)
 @router.get("/v2/countries", response_model=OpenAQResult)
 async def countries_get(
@@ -91,6 +92,7 @@ async def countries_get(
         name,
         sum(value_count) as count,
         count(*) as locations,
+        count(distinct city) as cities,
         to_char(min(first_datetime),'YYYY-MM-DD') as "firstUpdated",
         to_char(max(last_datetime), 'YYYY-MM-DD') as "lastUpdated",
         array_agg(DISTINCT measurand) as parameters
@@ -325,7 +327,7 @@ class Locations(Location, City, Country, Geo, Measurands, HasGeo, APIBase):
                         """
                     )
                 elif f == "isMobile":
-                    wheres.append(' "isMobile" ')
+                    wheres.append(f' "isMobile" = {bool(v)} ')
                 # elif isinstance(v, List):
                 #     wheres.append(f"{f} = ANY(:{f})")
         if len(wheres) > 0:

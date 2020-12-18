@@ -79,8 +79,9 @@ async def averages_v2_get(
 
     q = f"""
         SELECT
-            min(st),
-            max(et)
+            min(first_datetime),
+            max(last_datetime),
+            count(distinct concat(groups_id,'~~~',measurands_id)) as groups
         FROM rollups.rollups
         LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
         WHERE
@@ -97,6 +98,7 @@ async def averages_v2_get(
     try:
         range_start = rows[0][0].replace(tzinfo=UTC)
         range_end = rows[0][1].replace(tzinfo=UTC)
+        count = rows[0][2]
     except Exception:
         return OpenAQResult()
 
@@ -110,17 +112,40 @@ async def averages_v2_get(
     else:
         qparams["date_to"] = min(date_to, range_end)
 
+    if range_end <= range_start:
+        return OpenAQResult()
+
     temporal = av.temporal
 
-    # hourly data does not use any rollups
-    if av.temporal in ["hour", "hod"]:
-        # enforce limit of one month
+    # estimate max number of rows to be returned
+    hours = (range_end - range_start).total_seconds() / 3600
+    logger.debug(
+        'range_start %s range_end %s hours %s',
+        range_start,
+        range_end,
+        hours
+    )
+    if av.temporal in ["hour"]:
+        count = count * hours
+    elif av.temporal in ["day"]:
+        count = count * hours / 24
+    elif av.temporal in ["month"]:
+        count = count * hours / (24 * 30)
+    elif av.temporal in ["year"]:
+        count = count * hours / (24 * 365)
+    elif av.temporal in ["hod"]:
+        count * 24
+    elif av.temporal in ["dom"]:
+        count * 30
+    else:
+        count = count
+    count = int(count)
 
+    if av.temporal in ["hour", "hod"]:
         if av.temporal == "hour":
             temporal_col = "date_trunc('hour', datetime)"
         else:
             temporal_col = "extract('hour' from datetime)"
-
         baseq = f"""
             SELECT
                 measurand as parameter,
@@ -144,8 +169,11 @@ async def averages_v2_get(
             BETWEEN :date_from::timestamptz
             AND :date_to::timestamptz
             GROUP BY 1,2,3,4,5,6,7,8
-
+            ORDER BY 4 DESC
+            OFFSET :offset
+            LIMIT :limit
             """
+
     else:
         temporal_order = "st"
         temporal_col = "st::date"
@@ -199,17 +227,19 @@ async def averages_v2_get(
             LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
             {where}
             {group_clause}
+            ORDER BY 4 DESC
+            OFFSET :offset
+            LIMIT :limit
         """
+
+    qparams["count"] = count
 
     q = f"""
         WITH base AS (
             {baseq}
         )
-        SELECT count(*) over () as count, to_jsonb(base)-'{{o,st}}'::text[]
+        SELECT :count::bigint as count, to_jsonb(base)-'{{o,st}}'::text[]
         FROM base
-        ORDER BY o DESC
-        OFFSET :offset
-        LIMIT :limit;
         """
     av.temporal = temporal
     qparams["temporal"] = temporal
