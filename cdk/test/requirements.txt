@@ -1,0 +1,18 @@
+# fastapi>=0.61.2
+git+git://github.com/bitner/fastapi.git@multialias
+mangum>=0.1.0
+fastapi-utils
+wheel
+pypika
+asyncpg
+pydantic[dotenv]
+buildpg
+aiocache
+jq
+orjson
+msgpack
+asyncpg
+uvicorn
+pytz
+jinja2
+typer

@@ -28,6 +28,7 @@ setup(
         "uvicorn",
         "jinja2",
         "typer",
+        "markdown",
     ],
     extras_require={
         "dev": [

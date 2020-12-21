@@ -158,9 +158,9 @@ class Country(OBaseModel):
 
 
 class SourceName(OBaseModel):
-    source_name: Optional[List[str]] = Query(
-        None, aliases=("source", "sourceName")
-    )
+    sourceName: Optional[List[str]] = None
+    sourceId: Optional[List[int]] = None
+    sourceSlug: Optional[List[str]] = None
 
 
 def id_or_name_validator(name, v, values):
@@ -259,7 +259,8 @@ class Geo(OBaseModel):
 
 
 class Measurands(OBaseModel):
-    parameter: Optional[List[str]] = None
+    parameter_id: Optional[int] = None
+    parameter: Optional[List[Union[int, str]]] = Query(None, gt=0, le=maxint)
     measurand: Optional[List[str]] = None
     units: Optional[List[str]] = None
 
@@ -270,10 +271,10 @@ class Measurands(OBaseModel):
         return v
 
     @validator("parameter", check_fields=False)
-    def check_parameter(cls, v, values):
+    def validate_parameter(cls, v, values):
         if v is None:
-            return values.get("measurand")
-        return v
+            v = values.get("measurand")
+        return id_or_name_validator("project", v, values)
 
 
 class Paging(OBaseModel):
