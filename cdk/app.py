@@ -66,6 +66,7 @@ ingestpackage = aws_lambda.Code.asset(
     str(pathlib.Path.joinpath(code_dir, "package.zip"))
 )
 
+
 class LambdaApiStack(core.Stack):
     def __init__(
         self,
@@ -142,13 +143,13 @@ class LambdaIngestStack(core.Stack):
         openaq_fetch_bucket.grant_read(ingest_function)
 
 
-
-
 app = core.App()
 print(f"openaq-lcs-api{settings.OPENAQ_ENV}")
 staging = LambdaApiStack(app, "openaq-lcs-apistaging", package=stagingpackage)
 prod = LambdaApiStack(app, "openaq-lcs-api", package=prodpackage)
-ingest = LambdaIngestStack(app, f"openaq-lcs-ingest{settings.OPENAQ_ENV}", package=ingestpackage)
+ingest = LambdaIngestStack(
+    app, f"openaq-lcs-ingest{settings.OPENAQ_ENV}", package=ingestpackage
+)
 core.Tags.of(staging).add("devseed", "true")
 core.Tags.of(staging).add("lcs", "true")
 core.Tags.of(ingest).add("devseed", "true")
