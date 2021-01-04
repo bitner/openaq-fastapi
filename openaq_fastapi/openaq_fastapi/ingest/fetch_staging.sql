@@ -16,3 +16,7 @@ CREATE TEMP TABLE IF NOT EXISTS tempfetchdata (
     tfdid int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     sensors_id int
 ) ON COMMIT DROP;
+
+CREATE TEMP TABLE ingestfiles(
+    key text
+);

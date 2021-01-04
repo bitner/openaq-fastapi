@@ -82,8 +82,8 @@ async def averages_v2_get(
             min(first_datetime),
             max(last_datetime),
             count(distinct concat(groups_id,'~~~',measurands_id)) as groups
-        FROM rollups.rollups
-        LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+        FROM rollups
+        LEFT JOIN groups_view USING (groups_id, measurands_id)
         WHERE
             rollup = 'total'
             AND
@@ -158,10 +158,10 @@ async def averages_v2_get(
                 subtitle,
                 count(*) as measurement_count,
                 round((sum(value)/count(*))::numeric, 4) as average
-            FROM measurements_all
+            FROM measurements
             LEFT JOIN sensors USING (sensors_id)
-            LEFT JOIN rollups.groups_sensors USING (sensors_id)
-            LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+            LEFT JOIN groups_sensors USING (sensors_id)
+            LEFT JOIN groups_view USING (groups_id, measurands_id)
             WHERE {initwhere}
             AND
                 type = :spatial::text
@@ -223,8 +223,8 @@ async def averages_v2_get(
                 name,
                 subtitle,
                 {agg_clause}
-            FROM rollups.rollups
-            LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+            FROM rollups
+            LEFT JOIN groups_view USING (groups_id, measurands_id)
             {where}
             {group_clause}
             ORDER BY 4 DESC

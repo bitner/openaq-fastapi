@@ -12,4 +12,6 @@
 **/.pytest_cache
 **/.hypothesis
 __pycache__
-**/__pycache__
+**/__pycache__**/test
+**/cdk.out
+**/package.zip

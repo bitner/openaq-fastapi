@@ -4,7 +4,7 @@ SELECT
         '{mindate}'::timestamptz,
         '{maxdate}'::timestamptz,
         null,
-        TRUE,
+        FALSE,
         FALSE,
         FALSE
     );

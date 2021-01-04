@@ -128,7 +128,7 @@ class LambdaIngestStack(core.Stack):
             self,
             f"{id}-ingestlambda",
             code=package,
-            handler="openaq_fastapi.ingest.fetch.handler",
+            handler="openaq_fastapi.ingest.handler.handler",
             runtime=aws_lambda.Runtime.PYTHON_3_8,
             allow_public_subnet=True,
             memory_size=1512,

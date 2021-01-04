@@ -75,12 +75,12 @@ async def measurements_get(
 
     rolluptype = "node"
     joins = """
-        LEFT JOIN rollups.groups_sensors USING (groups_id)
-        LEFT JOIN rollups.measurements_fastapi_base b
+        LEFT JOIN groups_sensors USING (groups_id)
+        LEFT JOIN measurements_fastapi_base b
         ON (groups_sensors.sensors_id=b.sensors_id)
     """
     params = m.dict()
-    params['mobile'] = m.isMobile
+    params["mobile"] = m.isMobile
     where = m.where()
     if m.isMobile is None:
         if (
@@ -101,8 +101,8 @@ async def measurements_get(
             sum(value_count),
             min(first_datetime),
             max(last_datetime)
-        FROM rollups.rollups
-        LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
+        FROM rollups
+        LEFT JOIN groups_view USING (groups_id, measurands_id)
         {joins}
         WHERE rollup = 'month' and type='{rolluptype}'
             AND
@@ -140,7 +140,6 @@ async def measurements_get(
 
     date_from_adj = date_from
     date_to_adj = date_to
-
 
     params["date_from_adj"] = date_from_adj
     params["date_to_adj"] = date_to_adj
@@ -185,13 +184,23 @@ async def measurements_get(
                     value,
                     datetime,
                     timezone,
-                    COALESCE(a.geog, b.geog, NULL) as geog,
+                    CASE WHEN lon is not null and lat is not null THEN
+                        json_build_object(
+                            'latitude',lat,
+                            'longitude', lon
+                            )
+                        WHEN b.geog is not null THEN
+                        json_build_object(
+                                'latitude', st_y(geog::geometry),
+                                'longitude', st_x(geog::geometry)
+                            )
+                        ELSE NULL END AS coordinates,
                     units as unit,
                     country,
                     city,
                     ismobile
-                FROM measurements_all a
-                LEFT JOIN rollups.measurements_fastapi_base b USING (sensors_id)
+                FROM measurements a
+                LEFT JOIN measurements_fastapi_base b USING (sensors_id)
                 WHERE {m.where()}
                 AND datetime
                 BETWEEN :rangestart::timestamptz
@@ -211,10 +220,7 @@ async def measurements_get(
                             format_timestamp(datetime, timezone)
                         ) as date,
                         unit,
-                        json_build_object(
-                                'latitude', st_y(geog::geometry),
-                                'longitude', st_x(geog::geometry)
-                            ) as coordinates,
+                        coordinates,
                         country,
                         city,
                         ismobile as "isMobile"

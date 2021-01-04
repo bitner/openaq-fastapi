@@ -4,7 +4,7 @@ datetime <= (
     SELECT max(range_end)
     FROM timescaledb_information.chunks
     WHERE
-        hypertable_name IN ('roolups', 'measurements_all')
+        hypertable_name IN ('rollups', 'measurements')
         AND is_compressed
 );
 DELETE FROM tempfetchdata WHERE datetime > now();

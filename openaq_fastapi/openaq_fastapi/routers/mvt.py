@@ -8,7 +8,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse
 from starlette.templating import Jinja2Templates
 from typing import Union
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -60,6 +60,7 @@ async def get_tile(
     z: int = Path(..., ge=0, le=30, description="Mercator tiles's zoom level"),
     x: int = Path(..., description="Mercator tiles's column"),
     y: int = Path(..., description="Mercator tiles's row"),
+    isMobile: bool = None,
     parameter: str = None,
     lastUpdatedFrom: Union[datetime, date, None] = None,
     lastUpdatedTo: Union[datetime, date, None] = None,
@@ -87,6 +88,11 @@ async def get_tile(
         paramwhere = " measurand=:parameter AND "
         paramgroup = "1,2,3,4,5,6"
 
+    ismobileq=""
+    if isMobile is not None:
+        params['ismobile']=isMobile
+        ismobileq=" AND ismobile=:ismobile "
+
     query = f"""
         WITH
         tile AS (
@@ -110,6 +116,7 @@ async def get_tile(
             geom && tile
             {dffrom}
             {dfto}
+            {ismobileq}
             GROUP BY {paramgroup}, tile
         ),
         bounds AS (
@@ -155,8 +162,8 @@ async def get_mobiletile(
     x: int = Path(..., description="Mercator tiles's column"),
     y: int = Path(..., description="Mercator tiles's row"),
     parameter: str = None,
-    dateFrom: Union[datetime, date] = Query(...),
-    dateTo: Union[datetime, date] = Query(...),
+    dateFrom: Union[datetime, date] = Query(datetime.now()-timedelta(days=7)),
+    dateTo: Union[datetime, date] = Query(datetime.now()),
     db: DB = Depends(),
 ):
     """Return vector tile."""
@@ -172,25 +179,25 @@ async def get_mobiletile(
         params["dateto"] = fix_datetime(dateTo)
         dfto = " AND datetime <= :dateto "
 
-    if (dateTo - dateFrom).total_seconds() > 60*60*24*14:
+    if (dateTo - dateFrom).total_seconds() > 60*60*24*15:
         raise HTTPException(status_code=422, detail=[{"loc":[],"msg":'Max date range allowed for viewing individual points is 2 weeks',"type":None}])
 
     paramcols = ""
     paramwhere = ""
-    value = " null::text as value "
+    value = " null::float as value, "
     if parameter is not None:
         params["parameter"] = parameter
         paramcols = ' measurand as parameter, units as unit, value, '
-        value =" last(value, datetime) as value, "
+        value =" value, "
         paramwhere = " AND measurand=:parameter "
 
     query = f"""
         WITH
         tile AS (
-            SELECT ST_TileEnvelope(:z,:x,:y) as tile
+            SELECT st_setsrid(ST_TileEnvelope(:z,:x,:y),3857) as tile
         ),
-        tilegeog AS (
-            SELECT st_transform(tile, 4326)::geography as tilegeog FROM tile
+        tile4326 AS (
+            SELECT st_transform(tile, 4326) as tile4326 FROM tile
         ),
         l AS (
             SELECT
@@ -209,25 +216,26 @@ async def get_mobiletile(
         t AS (
             SELECT
                 sensors_id,
-                date_trunc('minute', datetime) as datetime,
+                datetime,
                 {value}
                 ST_ASMVTGeom(
-                    st_transform(last(geog, datetime)::geometry, 3857),
+                    pt3857(
+                        lon,
+                        lat
+                    ),
                     tile
                 ) as mvt
             FROM
-            tile,
-            tilegeog,
-            measurements_all
+            tile, tile4326,
+            measurements
             WHERE
             sensors_id IN (SELECT sensors_id FROM l)
             AND
-            geog IS NOT NULL
-            AND
-            geog && tilegeog
+            lon IS NOT NULL AND lat IS NOT NULL
+            AND lon <= st_xmax(tile4326) AND lon >= st_xmin(tile4326)
+            AND lat <= st_ymax(tile4326) AND lat >= st_ymin(tile4326)
              {dffrom}
              {dfto}
-            GROUP BY 1,2, tile
             ORDER BY 2 DESC LIMIT 1000
         ),
         joined AS (
@@ -237,7 +245,7 @@ async def get_mobiletile(
                 {paramcols}
                 mvt
             FROM
-                l LEFT JOIN t USING (sensors_id)
+                l JOIN t USING (sensors_id)
         )
         SELECT ST_AsMVT(joined, 'default') FROM joined;
     """

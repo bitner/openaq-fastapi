@@ -20,7 +20,6 @@ from pydantic import (
     confloat,
     conint,
     validator,
-    ValidationError,
 )
 from pydantic.typing import Any
 

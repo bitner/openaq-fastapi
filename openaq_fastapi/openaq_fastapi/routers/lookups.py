@@ -1,8 +1,5 @@
 import logging
-from os import name
 from typing import List
-import ast
-from dateutil.parser import isoparse
 
 import jq
 from fastapi import APIRouter, Depends, Path, Query
@@ -57,9 +54,9 @@ async def cities_get(
     sensor_nodes
     LEFT JOIN sensor_systems USING (sensor_nodes_id)
     LEFT JOIN sensors USING (sensor_systems_id)
-    LEFT JOIN rollups.rollups USING (sensors_id, measurands_id)
-    LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
-    WHERE rollups.rollup='total' AND rollups.groups_view.type='node'
+    LEFT JOIN rollups USING (sensors_id, measurands_id)
+    LEFT JOIN groups_view USING (groups_id, measurands_id)
+    WHERE rollup='total' AND groups_view.type='node'
     AND {cities.where()}
     GROUP BY
     1,2
@@ -77,9 +74,9 @@ async def cities_get(
 
 
 class Countries(Country, APIBase):
-    order_by: Literal["country", "firstUpdated", "lastUpdated", "count", "locations"] = Query(
-        "country"
-    )
+    order_by: Literal[
+        "country", "firstUpdated", "lastUpdated", "count", "locations"
+    ] = Query("country")
 
     def where(self):
         wheres = []
@@ -106,11 +103,11 @@ async def countries_get(
         order_by = "last_datetime"
     elif countries.order_by == "firstUpdated":
         order_by = "first_datetime"
-    elif countries.order_by == 'country':
+    elif countries.order_by == "country":
         order_by = "iso"
-    elif countries.order_by == 'count':
+    elif countries.order_by == "count":
         order_by = "sum(value_count)"
-    elif countries.order_by == 'locations':
+    elif countries.order_by == "locations":
         order_by = "count(*)"
 
     q = f"""
@@ -126,8 +123,8 @@ async def countries_get(
         max(last_datetime) as "lastUpdated",
         array_agg(DISTINCT measurand) as parameters
     FROM countries_lookup cl
-    JOIN rollups.groups_view gv ON (gv.name=cl.iso)
-    JOIN rollups.rollups r USING (groups_id, measurands_id)
+    JOIN groups_view gv ON (gv.name=cl.iso)
+    JOIN rollups r USING (groups_id, measurands_id)
     JOIN LATERAL (
         SELECT count(DISTINCT city) as cities FROM sensor_nodes
         WHERE country=cl.iso
@@ -205,9 +202,9 @@ async def sources_get(
     LEFT JOIN sensor_nodes_sources USING (sources_id)
     LEFT JOIN sensor_systems USING (sensor_nodes_id)
     LEFT JOIN sensors USING (sensor_systems_id)
-    LEFT JOIN rollups.rollups USING (sensors_id, measurands_id)
-    LEFT JOIN rollups.groups_view USING (groups_id, measurands_id)
-    WHERE rollups.rollup='total' AND rollups.groups_view.type='node'
+    LEFT JOIN rollups USING (sensors_id, measurands_id)
+    LEFT JOIN groups_view USING (groups_id, measurands_id)
+    WHERE rollup='total' AND groups_view.type='node'
     AND {sources.where()}
     GROUP BY
     1,2,3,4,5
@@ -255,10 +252,10 @@ async def parameters_get(
     return output
 
 
-class Projects(Project, APIBase):
+class Projects(Project, Measurands, APIBase):
     order_by: Literal[
         "id", "name", "subtitle", "firstUpdated", "lastUpdated"
-    ] = Query("id")
+    ] = Query("lastUpdated")
 
     def where(self):
         wheres = []
@@ -270,8 +267,26 @@ class Projects(Project, APIBase):
                     wheres.append(" groups_id = ANY(:project) ")
                 elif f == "project":
                     wheres.append(" name = ANY(:project) ")
-                elif isinstance(v, List):
-                    wheres.append(f"{f} = ANY(:{f})")
+                elif f == "units":
+                    wheres.append(" units = ANY(:units) ")
+
+                elif f == "parameter":
+                    if all(isinstance(x, int) for x in v):
+                        wheres.append(
+                            """
+                            measurands_id = ANY (:parameter)
+                            """
+                        )
+                    else:
+                        wheres.append(
+                            """
+                            measurand = ANY (:parameter)
+                            """
+                        )
+
+                # elif isinstance(v, List):
+                #    wheres.append(f"{f} = ANY(:{f})")
+
         if len(wheres) > 0:
             return (" AND ").join(wheres)
         return " TRUE "
@@ -290,7 +305,7 @@ async def projects_get(
                 groups_id as "id",
                 name,
                 subtitle,
-                geog,
+                --geog,
                 value_count as count,
                 value_sum / value_count as average,
                 locations,
@@ -301,14 +316,17 @@ async def projects_get(
                 last(last_value, last_datetime) as "lastValue",
                 max(last_datetime) as "lastUpdated",
                 min(first_datetime) as "firstUpdated",
-                st_extent(bounds::geometry) as bounds
+                min(minx) as minx,
+                min(miny) as miny,
+                max(maxx) as maxx,
+                max(maxy) as maxy
             FROM
-                rollups.rollups LEFT JOIN rollups.groups_view
+                rollups LEFT JOIN groups_view
                 USING (groups_id, measurands_id)
             WHERE
                 type='source' AND rollup='total'
                 AND {projects.where()}
-            GROUP BY 1,2,3,4,5,6,7,8,9,10,11
+            GROUP BY 1,2,3,4,5,6,7,8,9,10
             ORDER BY "{projects.order_by}" {projects.sort}
 
         )
@@ -317,20 +335,28 @@ async def projects_get(
             "id",
             name,
             subtitle,
-            ARRAY[
-                st_xmin(st_extent(bounds::geometry)),
-                st_ymin(st_extent(bounds::geometry)),
-                st_xmax(st_extent(bounds::geometry)),
-                st_ymax(st_extent(bounds::geometry))
-                ] AS bbox,
+            ARRAY[minx, miny, maxx, maxy] as bbox,
             --array_agg(distinct sources),
             sum(count) as measurements,
             max(locations) as locations,
+            max("lastUpdated") as "lastUpdated",
+            min("firstUpdated") as "firstUpdated",
             array_merge_agg(location_ids) as locationIds,
             jsonb_agg(to_jsonb(bysensor) -
-            '{{id,name,subtitle,bounds,geog,sources,location_ids}}'::text[]) as parameters
+            '{{
+                id,
+                name,
+                subtitle,
+                geog,
+                sources,
+                location_ids,
+                minx,
+                miny,
+                maxx,
+                maxy
+            }}'::text[]) as parameters
             FROM bysensor
-            GROUP BY 1,2,3
+            GROUP BY 1,2,3,4
         )
         select count(*) OVER () as count, to_jsonb(overall) as json
         from overall
@@ -357,6 +383,8 @@ class Locations(Location, City, Country, Geo, Measurands, HasGeo, APIBase):
     sort: Optional[Sort] = Query("desc")
     isMobile: Optional[bool] = None
     sourceName: Optional[List[str]] = None
+    modelName: Optional[List[str]] = None
+    manufacturerName: Optional[List[str]] = None
 
     def where(self):
         wheres = []
@@ -399,6 +427,24 @@ class Locations(Location, City, Country, Geo, Measurands, HasGeo, APIBase):
                         """
                         sources @> ANY(
                             jsonb_array_query('name',:sourcename::text[])
+                            ||
+                            jsonb_array_query('id',:sourcename::text[])
+                            )
+                        """
+                    )
+                elif f == "modelName":
+                    wheres.append(
+                        """
+                        manufacturers @> ANY(
+                            jsonb_array_query('modelName',:model_name::text[])
+                            )
+                        """
+                    )
+                elif f == "manufacturerName":
+                    wheres.append(
+                        """
+                        manufacturers @> ANY(
+                            jsonb_array_query('manufacturerName',:manufacturer_name::text[])
                             )
                         """
                     )
@@ -425,6 +471,8 @@ async def locations_get(
 
     qparams = locations.dict(exclude_none=True)
     qparams["sourcename"] = locations.sourceName
+    qparams["model_name"] = locations.modelName
+    qparams["manufacturer_name"] = locations.manufacturerName
 
     q = f"""
         WITH t1 AS (
@@ -443,7 +491,11 @@ async def locations_get(
             {locations.where()}
         ),
         t2 AS (
-        SELECT row, to_jsonb(t1) - '{{json,source_name,geog, row}}'::text[] as json
+        SELECT
+        row,
+        jsonb_strip_nulls(
+            to_jsonb(t1) - '{{json,source_name,geog, row}}'::text[]
+        ) as json
         FROM t1 group by row, t1, json
         )
         SELECT nodes as count, json

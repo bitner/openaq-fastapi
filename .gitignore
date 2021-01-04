@@ -184,3 +184,5 @@ dist/
 gwt-unitCache
 .sass-cache/
 .direnv/
+**/Untitled.ipynb
+**/test

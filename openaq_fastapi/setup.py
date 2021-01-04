@@ -29,6 +29,10 @@ setup(
         "jinja2",
         "typer",
         "markdown",
+        "psycopg2-binary",
+        "boto3",
+        "pytz",
+        "dateparser",
     ],
     extras_require={
         "dev": [

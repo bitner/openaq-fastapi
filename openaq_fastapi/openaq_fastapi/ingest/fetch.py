@@ -4,13 +4,20 @@ import json
 import os
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import boto3
 import psycopg2
 import typer
 
 from ..settings import settings
+from .utils import (
+    StringIteratorIO,
+    check_if_done,
+    clean_csv_value,
+    get_query,
+    load_fail,
+    load_success,
+)
 
 app = typer.Typer()
 
@@ -19,48 +26,6 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 
 FETCH_BUCKET = settings.OPENAQ_FETCH_BUCKET
 s3 = boto3.resource("s3")
-
-
-class StringIteratorIO(io.TextIOBase):
-    def __init__(self, iter):
-        self._iter = iter
-        self._buff = ""
-
-    def readable(self):
-        return True
-
-    def _read1(self, n=None):
-        while not self._buff:
-            try:
-                self._buff = next(self._iter)
-            except StopIteration:
-                break
-        ret = self._buff[:n]
-        self._buff = self._buff[len(ret) :]
-        return ret
-
-    def read(self, n=None):
-        line = []
-        if n is None or n < 0:
-            while True:
-                m = self._read1()
-                if not m:
-                    break
-                line.append(m)
-        else:
-            while n > 0:
-                m = self._read1(n)
-                if not m:
-                    break
-                n -= len(m)
-                line.append(m)
-        return "".join(line)
-
-
-def clean_csv_value(value):
-    if value is None:
-        return r"\N"
-    return str(value).replace("\n", "\\n").replace("\t", " ")
 
 
 def parse_json(j):
@@ -120,21 +85,15 @@ def parse_json(j):
     return linestr
 
 
-def get_query(file, **params):
-    # print(f"{params}")
-    query = Path(os.path.join(dir_path, file)).read_text()
-    if params is not None and len(params) >= 1:
-        print(f"adding parameters {params}")
-        query = query.format(**params)
-    return query
-
-
 def create_staging_table(cursor):
     cursor.execute(get_query("fetch_staging.sql"))
 
 
 def copy_data(cursor, key):
     obj = s3.Object(FETCH_BUCKET, key)
+    if check_if_done(cursor, key):
+        return None
+
     print(f"Copying data for {key}")
     with gzip.GzipFile(fileobj=obj.get()["Body"]) as gz:
         f = io.BufferedReader(gz)
@@ -145,12 +104,39 @@ def copy_data(cursor, key):
             query = get_query("fetch_copy.sql")
             cursor.copy_expert(query, iterator)
             print("status:", cursor.statusmessage)
+            load_success(cursor, key)
+
         except Exception as e:
-            print("full copy failed", key, e)
+            load_fail(cursor, key, e)
 
 
 def process_data(cursor):
-    query = get_query("fetch_ingest.sql")
+    print(1)
+    query = get_query("fetch_ingest1.sql")
+    cursor.execute(query)
+    print(cursor.statusmessage)
+    print(2)
+    query = get_query("fetch_ingest2.sql")
+    cursor.execute(query)
+    print(cursor.statusmessage)
+    print(3)
+    query = get_query("fetch_ingest3.sql")
+    cursor.execute(query)
+    print(cursor.statusmessage)
+    print(4)
+    query = get_query("fetch_ingest4.sql")
+    cursor.execute(query)
+    print(cursor.statusmessage)
+    print(5)
+    query = get_query("fetch_ingest5.sql")
+    cursor.execute(query)
+    print(cursor.statusmessage)
+    print(6)
+    query = get_query("fetch_ingest6.sql")
+    cursor.execute(query)
+    print(cursor.statusmessage)
+    print(7)
+    query = get_query("fetch_ingest7.sql")
     cursor.execute(query)
     print(cursor.statusmessage)
     results = cursor.fetchone()
@@ -176,9 +162,11 @@ def filter_data(cursor):
 
 
 def update_rollups(cursor, mindate, maxdate):
+    return None
     if mindate is not None and maxdate is not None:
         print(
-            f"Updating rollups from {mindate.isoformat()} to {maxdate.isoformat()}"
+            f"Updating rollups from {mindate.isoformat()}"
+            f" to {maxdate.isoformat()}"
         )
         cursor.execute(
             get_query(
@@ -243,7 +231,9 @@ def load_prefix(prefix):
 
 @app.command()
 def load_range(
-    start: datetime = typer.Argument(datetime.utcnow().date().isoformat()),
+    start: datetime = typer.Argument(
+        (datetime.utcnow().date() - timedelta(days=3)).isoformat()
+    ),
     end: datetime = typer.Argument(datetime.utcnow().date().isoformat()),
 ):
     print(
@@ -257,18 +247,34 @@ def load_range(
         start += step
 
 
-def handler(event, context):
-    print(event)
-    records = event.get("Records")
-    try:
-        for record in records:
-            bucket = record["s3"]["bucket"]["name"]
-            object = record["s3"]["object"]["name"]
-            print(f"Processing {bucket} {object}")
-            if bucket == "openaq":
-                load_fetch_file(object)
-    except Exception as e:
-        print(f"Exception: {e}")
+@app.command()
+def load_db(limit: int = 50):
+    with psycopg2.connect(settings.DATABASE_WRITE_URL) as connection:
+        connection.set_session(autocommit=False)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                    SELECT key,last_modified FROM fetchlogs
+                    WHERE key~E'^realtime-gzipped/.*\\.ndjson.gz$' AND
+                    completed_datetime is null
+                    ORDER BY last_modified desc nulls last
+                    LIMIT %s
+                    ;
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            keys = [r[0] for r in rows]
+            if len(keys) > 0:
+                create_staging_table(cursor)
+                for key in keys:
+                    copy_data(cursor, key)
+                    print("All data copied")
+                filter_data(cursor)
+                print('data filtered')
+                process_data(cursor)
+                print('data processed')
+            connection.commit()
 
 
 if __name__ == "__main__":
