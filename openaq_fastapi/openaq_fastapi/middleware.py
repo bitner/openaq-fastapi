@@ -70,8 +70,11 @@ class GetHostMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
 
-        if not hasattr(request.app.state, 'servers') or request.app.state.servers is None:
-            logger.debug(f"****************** Setting Servers to {request.base_url} ****")
+        if (
+            not hasattr(request.app.state, "servers")
+            or request.app.state.servers is None
+        ):
+            logger.debug(f"***** Setting Servers to {request.base_url} ****")
             request.app.state.servers = [{"url": str(request.base_url)}]
         else:
             request.app.state.servers = None

@@ -3,7 +3,7 @@ import os
 import pathlib
 
 from fastapi import APIRouter, Depends, Path, Response, Query
-from fastapi.exceptions import HTTPException, RequestValidationError
+from fastapi.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 from starlette.templating import Jinja2Templates
@@ -84,14 +84,18 @@ async def get_tile(
     paramgroup = "1,2,3,4"
     if parameter is not None:
         params["parameter"] = parameter
-        paramcols = ' measurand as parameter, units as unit, last(last_value, last_datetime) as "lastValue", '
+        paramcols = """
+            measurand as parameter,
+            units as unit,
+            last(last_value, last_datetime) as "lastValue",
+            """
         paramwhere = " measurand=:parameter AND "
         paramgroup = "1,2,3,4,5,6"
 
-    ismobileq=""
+    ismobileq = ""
     if isMobile is not None:
-        params['ismobile']=isMobile
-        ismobileq=" AND ismobile=:ismobile "
+        params["ismobile"] = isMobile
+        ismobileq = " AND ismobile=:ismobile "
 
     query = f"""
         WITH
@@ -162,7 +166,9 @@ async def get_mobiletile(
     x: int = Path(..., description="Mercator tiles's column"),
     y: int = Path(..., description="Mercator tiles's row"),
     parameter: str = None,
-    dateFrom: Union[datetime, date] = Query(datetime.now()-timedelta(days=7)),
+    dateFrom: Union[datetime, date] = Query(
+        datetime.now() - timedelta(days=7)
+    ),
     dateTo: Union[datetime, date] = Query(datetime.now()),
     db: DB = Depends(),
 ):
@@ -179,16 +185,28 @@ async def get_mobiletile(
         params["dateto"] = fix_datetime(dateTo)
         dfto = " AND datetime <= :dateto "
 
-    if (dateTo - dateFrom).total_seconds() > 60*60*24*15:
-        raise HTTPException(status_code=422, detail=[{"loc":[],"msg":'Max date range allowed for viewing individual points is 2 weeks',"type":None}])
+    if (dateTo - dateFrom).total_seconds() > 60 * 60 * 24 * 15:
+        raise HTTPException(
+            status_code=422,
+            detail=[
+                {
+                    "loc": [],
+                    "msg": (
+                        "Max date range allowed for "
+                        "viewing individual points is 2 weeks"
+                    ),
+                    "type": None,
+                }
+            ],
+        )
 
     paramcols = ""
     paramwhere = ""
     value = " null::float as value, "
     if parameter is not None:
         params["parameter"] = parameter
-        paramcols = ' measurand as parameter, units as unit, value, '
-        value =" value, "
+        paramcols = " measurand as parameter, units as unit, value, "
+        value = " value, "
         paramwhere = " AND measurand=:parameter "
 
     query = f"""
@@ -284,6 +302,7 @@ async def tilejsonfunc(
         "tiles": [tile_endpoint],
     }
 
+
 @router.get(
     "/v2/locations/tiles/tiles.json",
     response_model=TileJSON,
@@ -293,7 +312,7 @@ async def tilejsonfunc(
 async def tilejson(
     request: Request,
 ):
-    return await tilejsonfunc(request, 'get_tile', maxzoom=15)
+    return await tilejsonfunc(request, "get_tile", maxzoom=15)
 
 
 @router.get(
@@ -302,10 +321,8 @@ async def tilejson(
     responses={200: {"description": "Return a tilejson"}},
     response_model_exclude_none=True,
 )
-async def mobiletilejson(
-    request: Request
-):
-    return await tilejsonfunc(request, 'get_mobiletile', minzoom=8, maxzoom=15)
+async def mobiletilejson(request: Request):
+    return await tilejsonfunc(request, "get_mobiletile", minzoom=8, maxzoom=15)
 
 
 @router.get("/v2/locations/tiles/viewer", response_class=HTMLResponse)
@@ -317,7 +334,11 @@ def demo(request: Request):
     if params is not None:
         tile_url = f"{tile_url}?{params}"
         mobiletile_url = f"{mobiletile_url}?{params}"
-    context = {"endpoint": tile_url, "mobileendpoint": mobiletile_url, "request": request}
+    context = {
+        "endpoint": tile_url,
+        "mobileendpoint": mobiletile_url,
+        "request": request,
+    }
     return templates.TemplateResponse(
         name="vtviewer.html", context=context, media_type="text/html"
     )
