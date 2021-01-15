@@ -141,6 +141,7 @@ def load_success(cursor, key):
 
 def crawl(bucket, prefix):
     paginator = s3c.get_paginator("list_objects_v2")
+    print(settings.DATABASE_WRITE_URL)
     f = StringIO()
     cnt = 0
     for page in paginator.paginate(
@@ -158,7 +159,9 @@ def crawl(bucket, prefix):
         for obj in contents:
             key = obj["Key"]
             last_modified = obj["LastModified"]
-            f.write(f"{key}\t{last_modified}\n")
+            if key.endswith('.gz'):
+                f.write(f"{key}\t{last_modified}\n")
+                print(key)
     f.seek(0)
     with psycopg2.connect(settings.DATABASE_WRITE_URL) as connection:
         with connection.cursor() as cursor:
@@ -169,6 +172,7 @@ def crawl(bucket, prefix):
                     COPY staging(key,last_modified) FROM stdin;
                     INSERT INTO fetchlogs(key,last_modified)
                     SELECT * FROM staging
+                    WHERE last_modified>'2021-01-10'::timestamptz
                     ON CONFLICT (key) DO
                         UPDATE SET
                             last_modified=EXCLUDED.last_modified;

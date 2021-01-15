@@ -106,20 +106,28 @@ sensors.source_id = ms_sensors.ingest_id;
 
 SELECT count(*) from measurands;
 
-
+/*
 INSERT INTO measurands (measurand, units)
 SELECT DISTINCT measurand, units FROM ms_sensors
 ON CONFLICT DO NOTHING;
 
 SELECT count(*) from measurands;
+*/
 
 UPDATE ms_sensors SET measurands_id =
 measurands.measurands_id from measurands WHERE
 ms_sensors.measurand=measurands.measurand and
 ms_sensors.units=measurands.units;
 
+UPDATE ms_sensors
+SET measurands_id = 10
+WHERE
+ms_sensors.measurand='ozone'
+AND
+ms_sensors.units='ppm';
+
 INSERT INTO rejects (tbl,r) SELECT
-    'ms_sensors',
+    'ms_sensors no measurand',
     to_jsonb(ms_sensors)
 FROM ms_sensors WHERE measurands_id IS NULL;
 

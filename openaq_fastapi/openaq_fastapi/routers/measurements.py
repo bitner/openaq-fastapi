@@ -1,12 +1,16 @@
+from enum import Enum
 import logging
+import os
+from typing import Optional
 
 import orjson as json
 from dateutil.tz import UTC
 from datetime import timedelta, datetime
 from fastapi import APIRouter, Depends, Query
-from pydantic.typing import Literal
-from .base import (
-    DB,
+from starlette.responses import Response
+from ..db import DB
+from ..models.responses import Meta
+from ..models.queries import (
     APIBase,
     City,
     Country,
@@ -15,9 +19,13 @@ from .base import (
     HasGeo,
     Location,
     Measurands,
-    OpenAQResult,
-    Meta,
     Sort,
+)
+import csv
+import io
+
+from openaq_fastapi.models.responses import (
+    OpenAQResult,
 )
 
 logger = logging.getLogger("locations")
@@ -26,14 +34,57 @@ logger.setLevel(logging.DEBUG)
 router = APIRouter()
 
 
+def meas_csv(rows):
+    output = io.StringIO()
+    writer = csv.writer(output)
+    header = [
+        "location",
+        "city",
+        "country",
+        "utc",
+        "local",
+        "parameter",
+        "value",
+        "unit",
+        "latitude",
+        "longitude",
+    ]
+    writer.writerow(header)
+    for r in rows:
+        try:
+            row = [
+                r["location"],
+                r["city"],
+                r["country"],
+                r["date"]["utc"],
+                r["date"]["local"],
+                r["parameter"],
+                r["value"],
+                r["unit"],
+                r["coordinates"]["latitude"],
+                r["coordinates"]["longitude"],
+            ]
+            writer.writerow(row)
+        except Exception as e:
+            logger.debug(e)
+
+    return output.getvalue()
+
+
+class MeasOrder(str, Enum):
+    city = "city"
+    country = "country"
+    location = "location"
+    datetime = "datetime"
+
+
 class Measurements(
     Location, City, Country, Geo, Measurands, HasGeo, APIBase, DateRange
 ):
-    order_by: Literal["city", "country", "location", "datetime"] = Query(
-        "datetime"
-    )
+    order_by: MeasOrder = Query("datetime")
     sort: Sort = "desc"
     isMobile: bool = None
+    project: Optional[int] = None
 
     def where(self):
         wheres = []
@@ -54,46 +105,59 @@ class Measurements(
                     wheres.append(" units = ANY(:unit) ")
                 elif f == "isMobile":
                     wheres.append(" ismobile = :mobile ")
-
                 elif f in ["country", "city"]:
                     wheres.append(f"{f} = ANY(:{f})")
+        wheres.append(self.where_geo())
         wheres = list(filter(None, wheres))
         if len(wheres) > 0:
             return (" AND ").join(wheres)
         return " TRUE "
 
 
-@router.get("/v1/measurements", response_model=OpenAQResult)
-@router.get("/v2/measurements", response_model=OpenAQResult)
+@router.get("/v1/measurements", tags=["v1"])
+@router.get("/v2/measurements", tags=["v2"])
 async def measurements_get(
     db: DB = Depends(),
     m: Measurements = Depends(Measurements.depends()),
+    format: Optional[str] = None,
 ):
     count = None
     date_from = m.date_from
     date_to = m.date_to
+    where = m.where()
+    params = m.params()
 
     rolluptype = "node"
+
+    if m.project is not None:
+        locations = await db.fetchval(
+            """
+            SELECT nodes_from_project(:project::int);
+            """,
+            params,
+        )
+        params["locations"] = locations
+        where = f"{where} AND sensor_nodes_id = ANY(:locations) "
+
     joins = """
         LEFT JOIN groups_sensors USING (groups_id)
         LEFT JOIN measurements_fastapi_base b
         ON (groups_sensors.sensors_id=b.sensors_id)
     """
-    params = m.dict()
     params["mobile"] = m.isMobile
-    where = m.where()
     if m.isMobile is None:
         if (
-            (m.location is None or len(m.location)) == 0
-            and m.is_mobile is None
+            (m.location is None or len(m.location) == 0)
+            and m.isMobile is None
             and m.coordinates is None
+            and m.project is None
         ):
             joins = ""
             if m.country is None or len(m.country) == 0:
                 rolluptype = "total"
             else:
                 rolluptype = "country"
-                params = {"country": m.country}
+                params["country"] = m.country
                 where = " name =ANY(:country) "
     # get overall summary numbers
     q = f"""
@@ -112,6 +176,7 @@ async def measurements_get(
             AND
             {where}
         """
+    logger.debug(f"Params: {params}")
     rows = await db.fetch(q, params)
     logger.debug(f"{rows}")
     if rows is None:
@@ -131,7 +196,9 @@ async def measurements_get(
     if date_to is None:
         date_to = range_end
     else:
-        date_to = min(date_to, range_end, datetime.now().replace(tzinfo=UTC))
+        date_to = min(
+            date_to, range_end, datetime.utcnow().replace(tzinfo=UTC)
+        )
 
     count = total_count
     # if time is unbounded, we can just use the total count
@@ -149,7 +216,7 @@ async def measurements_get(
 
     # if we are ordering by time, keep us from searching everything
     # for paging
-    delta = timedelta(days=5)
+    delta = timedelta(days=1)
     if m.order_by == "datetime":
         if m.sort == "asc":
             date_to_adj = date_from_adj + delta
@@ -178,7 +245,7 @@ async def measurements_get(
             q = f"""
             WITH t AS (
                 SELECT
-                    sensors_id as location_id,
+                    sensor_nodes_id as location_id,
                     site_name as location,
                     measurand as parameter,
                     value,
@@ -202,17 +269,17 @@ async def measurements_get(
                 FROM measurements a
                 LEFT JOIN measurements_fastapi_base b USING (sensors_id)
                 WHERE {m.where()}
-                AND datetime
-                BETWEEN :rangestart::timestamptz
-                AND :rangeend::timestamptz
+                AND datetime >= :rangestart::timestamptz
+                AND datetime <= :rangeend::timestamptz
                 ORDER BY "{m.order_by}" {m.sort}
                 OFFSET :offset
                 LIMIT :limit
                 ), t1 AS (
                     SELECT
-                        location_id,
+                        location_id as "locationId",
                         location,
                         parameter,
+                        value,
                         json_build_object(
                             'utc',
                             format_timestamp(datetime, 'UTC'),
@@ -235,7 +302,7 @@ async def measurements_get(
                 logger.debug(f"{len(rows)} rows found")
                 rc = rc + len(rows)
                 if len(rows) > 0 and rows[0][1] is not None:
-                    results.append(
+                    results.extend(
                         [
                             json.loads(r[1])
                             for r in rows
@@ -259,10 +326,21 @@ async def measurements_get(
             params["rangestart"] = rangestart
             params["rangeend"] = rangeend
     meta = Meta(
+        website=os.getenv("APP_HOST", "/"),
         page=m.page,
         limit=m.limit,
         found=count,
     )
+
+    if format == "csv":
+        return Response(
+            content=meas_csv(results),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": "attachment;filename=measurements.csv"
+            },
+        )
+
     output = OpenAQResult(meta=meta, results=results)
 
     # output = await db.fetchOpenAQResult(q, m.dict())

@@ -4,6 +4,7 @@ import dateparser
 import pytz
 import orjson
 import csv
+from urllib.parse import unquote_plus
 
 import boto3
 import psycopg2
@@ -109,7 +110,12 @@ class LCSData:
         self.nodes.append(node)
 
     def get_station(self, key):
+        if str.endswith(key, ".gz"):
+            compression = "GZIP"
+        else:
+            compression = "NONE"
         try:
+            print(f"key: {key}")
             resp = s3c.select_object_content(
                 Bucket=FETCH_BUCKET,
                 Key=key,
@@ -117,7 +123,7 @@ class LCSData:
                 Expression="SELECT * FROM s3object",
                 InputSerialization={
                     "JSON": {"Type": "Document"},
-                    "CompressionType": "NONE",
+                    "CompressionType": compression,
                 },
                 OutputSerialization={"JSON": {}},
             )
@@ -228,8 +234,10 @@ class LCSData:
             with connection.cursor() as cursor:
 
                 for obj in self.page:
+
                     key = obj["Key"]
                     last_modified = obj["LastModified"]
+                    print(f"{key} {last_modified}")
                     # if last_modified > self.st:
                     cursor.execute(
                         """
@@ -283,7 +291,7 @@ def load_metadata_bucketscan(count=100):
             break
 
 
-def load_metadata_db():
+def load_metadata_db(count=250):
     with psycopg2.connect(settings.DATABASE_WRITE_URL) as connection:
         connection.set_session(autocommit=False)
         with connection.cursor() as cursor:
@@ -291,15 +299,18 @@ def load_metadata_db():
                 """
                     SELECT key,last_modified FROM fetchlogs
                     WHERE key~'lcs-etl-pipeline/stations/' AND
-                    completed_datetime is null;
-                    """
+                    completed_datetime is null order by
+                    last_modified asc nulls last
+                    limit %s;
+                    """,
+                (count,),
             )
             rows = cursor.fetchall()
             contents = []
             for row in rows:
                 contents.append(
                     {
-                        "Key": row[0],
+                        "Key": unquote_plus(row[0]),
                         "LastModified": row[1],
                     }
                 )
@@ -310,6 +321,11 @@ def load_metadata_db():
 
 def load_measurements(key):
     print(key)
+
+    if str.endswith(key, ".gz"):
+        compression = "GZIP"
+    else:
+        compression = "NONE"
     try:
         resp = s3c.select_object_content(
             Bucket=settings.OPENAQ_ETL_BUCKET,
@@ -322,7 +338,7 @@ def load_measurements(key):
                 """,
             InputSerialization={
                 "CSV": {"FieldDelimiter": ","},
-                "CompressionType": "NONE",
+                "CompressionType": compression,
             },
             OutputSerialization={"CSV": {}},
         )
@@ -393,7 +409,7 @@ def load_measurements_db(limit=250):
             cursor.execute(
                 """
                     SELECT key,last_modified FROM fetchlogs
-                    WHERE key~E'^lcs-etl-pipeline/measures/.*\\.csv$' AND
+                    WHERE key~E'^lcs-etl-pipeline/measures/.*\\.csv' AND
                     completed_datetime is null
                     ORDER BY last_modified desc nulls last
                     LIMIT %s

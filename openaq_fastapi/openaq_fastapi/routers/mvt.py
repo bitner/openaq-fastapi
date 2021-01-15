@@ -9,10 +9,11 @@ from starlette.responses import HTMLResponse
 from starlette.templating import Jinja2Templates
 from typing import Union
 from datetime import datetime, date, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
-from .base import DB, fix_datetime
+from ..models.queries import fix_datetime
+from ..db import DB
 import urllib
 
 templates = Jinja2Templates(
@@ -42,7 +43,6 @@ class TileJSON(BaseModel):
     minzoom: int = Field(0, ge=0, le=30)
     maxzoom: int = Field(30, ge=0, le=30)
     bounds: List[float] = [-180, -90, 180, 90]
-    center: Optional[Tuple[float, float, int]]
 
 
 logger = logging.getLogger("locations")
@@ -55,13 +55,15 @@ router = APIRouter()
     "/v2/locations/tiles/{z}/{x}/{y}.pbf",
     responses={200: {"content": {"application/x-protobuf": {}}}},
     response_class=Response,
+    tags=["v2"],
 )
 async def get_tile(
     z: int = Path(..., ge=0, le=30, description="Mercator tiles's zoom level"),
     x: int = Path(..., description="Mercator tiles's column"),
     y: int = Path(..., description="Mercator tiles's row"),
     isMobile: bool = None,
-    parameter: str = None,
+    parameter: Union[int, str] = None,
+    location: Optional[int] = None,
     lastUpdatedFrom: Union[datetime, date, None] = None,
     lastUpdatedTo: Union[datetime, date, None] = None,
     db: DB = Depends(),
@@ -81,7 +83,13 @@ async def get_tile(
 
     paramcols = ""
     paramwhere = ""
-    paramgroup = "1,2,3,4"
+    paramgroup = "1,2,3,4,5"
+
+    lwhere = " TRUE AND "
+    if location is not None:
+        params["location"] = location
+        lwhere = " location_id = :location AND "
+
     if parameter is not None:
         params["parameter"] = parameter
         paramcols = """
@@ -89,8 +97,11 @@ async def get_tile(
             units as unit,
             last(last_value, last_datetime) as "lastValue",
             """
-        paramwhere = " measurand=:parameter AND "
-        paramgroup = "1,2,3,4,5,6"
+        if isinstance(parameter, int):
+            paramwhere = " measurands_id=:parameter AND "
+        else:
+            paramwhere = " measurand=:parameter AND "
+        paramgroup = "1,2,3,4,5,6,7"
 
     ismobileq = ""
     if isMobile is not None:
@@ -108,6 +119,7 @@ async def get_tile(
                 last_datetime as "lastUpdated",
                 country,
                 ismobile as "isMobile",
+                "sensorType",
                 {paramcols}
                 sum(count) as count,
                 ST_AsMVTGeom(
@@ -117,6 +129,7 @@ async def get_tile(
             FROM locations, tile
             WHERE
             {paramwhere}
+            {lwhere}
             geom && tile
             {dffrom}
             {dfto}
@@ -135,6 +148,7 @@ async def get_tile(
             WHERE
             ismobile
             AND {paramwhere}
+            {lwhere}
             bounds && tile
             {dffrom}
             {dfto}
@@ -160,11 +174,12 @@ async def get_tile(
     "/v2/locations/tiles/mobile/{z}/{x}/{y}.pbf",
     responses={200: {"content": {"application/x-protobuf": {}}}},
     response_class=Response,
+    tags=["v2"],
 )
 async def get_mobiletile(
     z: int = Path(..., ge=0, le=30, description="Mercator tiles's zoom level"),
-    x: int = Path(..., description="Mercator tiles's column"),
-    y: int = Path(..., description="Mercator tiles's row"),
+    x: int = Path(...,ge=0, lt=99999, description="Mercator tiles's column"),
+    y: int = Path(...,ge=0, lt=99999,  description="Mercator tiles's row"),
     parameter: str = None,
     dateFrom: Union[datetime, date] = Query(
         datetime.now() - timedelta(days=7)
@@ -185,7 +200,7 @@ async def get_mobiletile(
         params["dateto"] = fix_datetime(dateTo)
         dfto = " AND datetime <= :dateto "
 
-    if (dateTo - dateFrom).total_seconds() > 60 * 60 * 24 * 15:
+    if (dateTo - dateFrom).total_seconds() > 60 * 60 * 24 * 32:
         raise HTTPException(
             status_code=422,
             detail=[
@@ -193,7 +208,7 @@ async def get_mobiletile(
                     "loc": [],
                     "msg": (
                         "Max date range allowed for "
-                        "viewing individual points is 2 weeks"
+                        "viewing individual points is 1 month"
                     ),
                     "type": None,
                 }
@@ -308,6 +323,7 @@ async def tilejsonfunc(
     response_model=TileJSON,
     responses={200: {"description": "Return a tilejson"}},
     response_model_exclude_none=True,
+    tags=["v2"],
 )
 async def tilejson(
     request: Request,
@@ -320,12 +336,15 @@ async def tilejson(
     response_model=TileJSON,
     responses={200: {"description": "Return a tilejson"}},
     response_model_exclude_none=True,
+    tags=["v2"],
 )
 async def mobiletilejson(request: Request):
     return await tilejsonfunc(request, "get_mobiletile", minzoom=8, maxzoom=15)
 
 
-@router.get("/v2/locations/tiles/viewer", response_class=HTMLResponse)
+@router.get(
+    "/v2/locations/tiles/viewer", response_class=HTMLResponse, tags=["v2"]
+)
 def demo(request: Request):
     params = urllib.parse.unquote(request.url.query)
     """Demo for each table."""

@@ -19,12 +19,18 @@ from .middleware import (
 )
 from .routers.averages import router as averages_router
 
-# from .routers.nodes import router as nodes_router
-from .routers.lookups import router as lookups_router
+from .routers.locations import router as locations_router
+from .routers.parameters import router as parameters_router
+from .routers.sources import router as sources_router
+from .routers.projects import router as projects_router
 from .routers.measurements import router as measurements_router
 from .routers.mvt import router as mvt_router
+from .routers.cities import router as cities_router
+from .routers.countries import router as countries_router
+from .routers.manufacturers import router as manufacturers_router
+
 from .settings import settings
-from .routers.base import db_pool
+from .db import db_pool
 
 logger = logging.getLogger("locations")
 logger.setLevel(logging.DEBUG)
@@ -136,8 +142,14 @@ def favico():
 # app.include_router(nodes_router)
 app.include_router(measurements_router)
 app.include_router(averages_router)
-app.include_router(lookups_router)
+app.include_router(locations_router)
+app.include_router(cities_router)
+app.include_router(countries_router)
 app.include_router(mvt_router)
+app.include_router(projects_router)
+app.include_router(sources_router)
+app.include_router(parameters_router)
+app.include_router(manufacturers_router)
 
 handler = Mangum(app, enable_lifespan=False)
 

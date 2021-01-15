@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from os import environ
 from typing import Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -76,6 +77,7 @@ class GetHostMiddleware(BaseHTTPMiddleware):
         ):
             logger.debug(f"***** Setting Servers to {request.base_url} ****")
             request.app.state.servers = [{"url": str(request.base_url)}]
+            environ['APP_HOST'] = str(request.base_url)
         else:
             request.app.state.servers = None
 

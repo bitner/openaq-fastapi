@@ -1,5 +1,5 @@
-# fastapi>=0.61.2
-git+git://github.com/bitner/fastapi.git@multialias
+fastapi>=0.61.2
+# git+git://github.com/bitner/fastapi.git@multialias
 mangum>=0.1.0
 fastapi-utils
 wheel
@@ -20,3 +20,4 @@ markdown
 psycopg2-binary
 boto3
 dateparser
+pyhumps

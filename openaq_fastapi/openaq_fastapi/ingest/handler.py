@@ -55,5 +55,8 @@ def handler(event, context):
 def cronhandler(event, context):
     print(event)
     load_metadata_db()
+    print("metadata loaded")
     load_measurements_db(250)
+    print("etl data loaded")
     load_db(50)
+    print("fetch data loaded")

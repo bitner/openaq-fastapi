@@ -269,6 +269,7 @@ def load_db(limit: int = 50):
                 create_staging_table(cursor)
                 for key in keys:
                     copy_data(cursor, key)
+                    connection.commit()
                     print("All data copied")
                 filter_data(cursor)
                 print('data filtered')

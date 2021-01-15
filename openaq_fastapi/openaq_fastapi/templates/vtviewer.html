@@ -26,11 +26,25 @@
       bottom: 0;
       width: 100%;
     }
+    #info {
+      display: block;
+      position: relative;
+      margin: 0px auto;
+      width: 50%;
+      padding: 10px;
+      border: none;
+      border-radius: 3px;
+      font-size: 12px;
+      text-align: center;
+      color: #222;
+      background: #fff;
+    }
   </style>
 </head>
 
 <body>
   <div id='map'></div>
+  <pre id="info"></pre>
   <script>
 
     const endpoint = '{{ endpoint }}'
@@ -138,7 +152,15 @@
           .setHTML(t)
           .addTo(map);
       })
-
+      map.on('mousemove', function (e) {
+        document.getElementById('info').innerHTML =
+        // e.point is the x, y coordinates of the mousemove event relative
+        // to the top-left corner of the map
+        JSON.stringify(e.point) +
+        '<br />' +
+        // e.lngLat is the longitude, latitude geographical position of the event
+        JSON.stringify(e.lngLat.wrap());
+      });
 
     })
   </script>

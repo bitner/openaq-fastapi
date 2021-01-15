@@ -3,17 +3,17 @@ import logging
 from dateutil.tz import UTC
 from fastapi import APIRouter, Depends, Query
 from typing import Optional, List
-from .base import (
-    DB,
+from ..db import DB
+from ..models.queries import (
     APIBase,
     Country,
     DateRange,
     Measurands,
-    OpenAQResult,
     Project,
     Spatial,
     Temporal,
 )
+from openaq_fastapi.models.responses import OpenAQResult
 from pydantic import root_validator
 
 logger = logging.getLogger("averages")
@@ -26,6 +26,7 @@ class Averages(APIBase, Country, Project, Measurands, DateRange):
     spatial: Spatial = Query(...)
     temporal: Temporal = Query(...)
     location: Optional[List[str]] = None
+    group: Optional[bool] = False
 
     def where(self):
         wheres = []
@@ -38,8 +39,13 @@ class Averages(APIBase, Country, Project, Measurands, DateRange):
                 wheres.append("name = ANY(:project)")
         if self.spatial == "location" and self.location is not None:
             wheres.append("name = ANY(:location)")
+        if self.parameter is not None:
+            if all(isinstance(x, int) for x in self.parameter):
+                wheres.append(" measurands_id = ANY(:parameter) ")
+            else:
+                wheres.append(" measurand = ANY(:parameter) ")
         for f, v in self:
-            if v is not None and f in ["measurand", "units"]:
+            if v is not None and f in ["units"]:
                 wheres.append(f"{f} = ANY(:{f})")
         if len(wheres) > 0:
             return (" AND ").join(wheres)
@@ -61,8 +67,7 @@ class Averages(APIBase, Country, Project, Measurands, DateRange):
         return values
 
 
-@router.get("/v1/averages", response_model=OpenAQResult)
-@router.get("/v2/averages", response_model=OpenAQResult)
+@router.get("/v2/averages", response_model=OpenAQResult, tags=["v2"])
 async def averages_v2_get(
     db: DB = Depends(),
     av: Averages = Depends(Averages.depends()),
@@ -73,7 +78,7 @@ async def averages_v2_get(
     qparams = av.dict(exclude_unset=True)
 
     if qparams["spatial"] == "project":
-        qparams["spatial"] = "source"
+        qparams["spatial"] = "organization"
     elif qparams["spatial"] == "location":
         qparams["spatial"] = "node"
 
@@ -120,10 +125,7 @@ async def averages_v2_get(
     # estimate max number of rows to be returned
     hours = (range_end - range_start).total_seconds() / 3600
     logger.debug(
-        'range_start %s range_end %s hours %s',
-        range_start,
-        range_end,
-        hours
+        "range_start %s range_end %s hours %s", range_start, range_end, hours
     )
     if av.temporal in ["hour"]:
         count = count * hours
@@ -141,6 +143,14 @@ async def averages_v2_get(
         count = count
     count = int(count)
 
+    wrapper_start = ""
+    wrapper_end = ""
+    groupby = "1,2,3,4,5,6,7"
+    if av.group:
+        wrapper_start = "array_agg(DISTINCT "
+        wrapper_end = ")"
+        groupby = "1,2,3,4"
+
     if av.temporal in ["hour", "hod"]:
         if av.temporal == "hour":
             temporal_col = "date_trunc('hour', datetime)"
@@ -148,14 +158,13 @@ async def averages_v2_get(
             temporal_col = "extract('hour' from datetime)"
         baseq = f"""
             SELECT
-                measurand as parameter,
-                units as unit,
+                measurands_id,
                 {temporal_col} as {av.temporal},
                 {temporal_col} as o,
                 {temporal_col} as st,
-                groups_id as id,
-                name,
-                subtitle,
+                {wrapper_start}groups_id{wrapper_end} as id,
+                {wrapper_start}name{wrapper_end} as name,
+                {wrapper_start}subtitle{wrapper_end} as subtitle,
                 count(*) as measurement_count,
                 round((sum(value)/count(*))::numeric, 4) as average
             FROM measurements
@@ -168,7 +177,7 @@ async def averages_v2_get(
             AND datetime
             BETWEEN :date_from::timestamptz
             AND :date_to::timestamptz
-            GROUP BY 1,2,3,4,5,6,7,8
+            GROUP BY {groupby}
             ORDER BY 4 DESC
             OFFSET :offset
             LIMIT :limit
@@ -177,11 +186,21 @@ async def averages_v2_get(
     else:
         temporal_order = "st"
         temporal_col = "st::date"
-        group_clause = ""
-        agg_clause = """
-            value_count as measurement_count,
-            round((value_sum/value_count)::numeric, 4) as average
-        """
+        if av.group or av.temporal in ["dow", "moy"]:
+            agg_clause = """
+                sum(value_count) as measurement_count,
+                round((sum(value_sum)/sum(value_count))::numeric, 4) as average
+            """
+        else:
+            agg_clause = """
+                value_count as measurement_count,
+                round((value_sum/value_count)::numeric, 4) as average
+            """
+
+        if av.group:
+            group_clause = " GROUP BY 1,2,3 "
+        else:
+            group_clause = " "
 
         if av.temporal == "moy":
             temporal = "month"
@@ -193,11 +212,10 @@ async def averages_v2_get(
             temporal_order = "to_char(st, 'ID')"
 
         if av.temporal in ["dow", "moy"]:
-            group_clause = " GROUP BY 1,2,3,4,5,6,7,8 "
-            agg_clause = """
-                sum(value_count) as measurement_count,
-                round((sum(value_sum)/sum(value_count))::numeric, 4) as average
-            """
+            if av.group:
+                group_clause = " GROUP BY 1,2,3 "
+            else:
+                group_clause = " GROUP BY 1,2,3,4,5,6 "
 
         where = f"""
             WHERE
@@ -214,20 +232,18 @@ async def averages_v2_get(
 
         baseq = f"""
             SELECT
-                measurand as parameter,
-                units as unit,
+                measurands_id,
                 {temporal_col} as {av.temporal},
                 {temporal_order} as o,
-                st,
-                groups_id as id,
-                name,
-                subtitle,
+                {wrapper_start}groups_id{wrapper_end} as id,
+                {wrapper_start}name{wrapper_end} as name,
+                {wrapper_start}subtitle{wrapper_end} as subtitle,
                 {agg_clause}
             FROM rollups
             LEFT JOIN groups_view USING (groups_id, measurands_id)
             {where}
             {group_clause}
-            ORDER BY 4 DESC
+            ORDER BY 3 DESC
             OFFSET :offset
             LIMIT :limit
         """
@@ -238,7 +254,10 @@ async def averages_v2_get(
         WITH base AS (
             {baseq}
         )
-        SELECT :count::bigint as count, to_jsonb(base)-'{{o,st}}'::text[]
+        SELECT :count::bigint as count,
+        (to_jsonb(base) ||
+        parameter(measurands_id)) -
+        '{{o,st, measurands_id}}'::text[]
         FROM base
         """
     av.temporal = temporal

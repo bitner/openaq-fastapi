@@ -11,7 +11,7 @@ setup(
     description="FastAPI API For OpenAQ",
     long_description=open("README.md").read(),
     install_requires=[
-        "fastapi @ git+https://github.com/bitner/fastapi.git@multialias",
+        "fastapi",
         "mangum>=0.1.0",
         "fastapi-utils",
         "wheel",
@@ -33,6 +33,7 @@ setup(
         "boto3",
         "pytz",
         "dateparser",
+        "pyhumps",
     ],
     extras_require={
         "dev": [
