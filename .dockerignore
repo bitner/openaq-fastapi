@@ -1,0 +1,17 @@
+.direnv
+.hypothesis
+*.md
+**/tests/*
+.vscode
+.pytest_cache
+.git
+.envrc
+.gitignore
+.dockerignore
+*.egg-info
+**/.pytest_cache
+**/.hypothesis
+__pycache__
+**/__pycache__**/test
+**/cdk.out
+**/package.zip

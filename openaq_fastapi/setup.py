@@ -11,7 +11,7 @@ setup(
     description="FastAPI API For OpenAQ",
     long_description=open("README.md").read(),
     install_requires=[
-        "fastapi @ git+https://github.com/bitner/fastapi.git@multialias",
+        "fastapi",
         "mangum>=0.1.0",
         "fastapi-utils",
         "wheel",
@@ -26,6 +26,13 @@ setup(
         "msgpack",
         "asyncpg",
         "uvicorn",
+        "jinja2",
+        "typer",
+        "markdown",
+        "psycopg2-binary",
+        "boto3",
+        "pytz",
+        "dateparser",
         "pyhumps",
     ],
     extras_require={
@@ -39,6 +46,13 @@ setup(
         ]
     },
     entry_points={
-        "console_scripts": ["openaq_fastapi=openaq_fastapi.main:run"]
+        "console_scripts": [
+            "openaqapi=openaq_fastapi.main:run",
+            "openaqfetch=openaq_fastapi.ingest.fetch:app",
+        ]
+    },
+    include_package_data=True,
+    package_data={
+        "": ["*.sql"],
     },
 )
